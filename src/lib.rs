@@ -5,3 +5,4 @@ pub mod pairing;
 pub mod protocol;
 pub mod store;
 pub mod tls;
+pub mod input;
