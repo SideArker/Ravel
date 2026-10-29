@@ -71,8 +71,8 @@ pub enum CaptureCreationError {
     #[error("error creating x11 capture backend: `{0}`")]
     X11(#[from] X11InputCaptureCreationError),
     #[cfg(windows)]
-    #[error("error creating windows capture backend")]
-    Windows,
+    #[error("error creating windows capture backend: {0}")]
+    Windows(#[from] std::io::Error),
     #[cfg(target_os = "macos")]
     #[error("error creating macos capture backend: `{0}`")]
     MacOS(#[from] MacosCaptureCreationError),

@@ -4,7 +4,7 @@ use std::ptr::addr_of_mut;
 
 use std::default::Default;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
@@ -19,12 +19,12 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DispatchMessageW, GetMessageW, PostThreadMessageW,
-    RegisterClassW, SetWindowsHookExW, TranslateMessage, EDD_GET_DEVICE_INTERFACE_NAME, HOOKPROC,
-    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE, WM_DISPLAYCHANGE, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
-    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WNDPROC,
+    RegisterClassW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    EDD_GET_DEVICE_INTERFACE_NAME, HHOOK, HOOKPROC, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+    LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE,
+    WM_DISPLAYCHANGE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WNDPROC,
 };
 
 use input_event::{
@@ -41,14 +41,14 @@ pub(crate) struct EventThread {
 }
 
 impl EventThread {
-    pub(crate) fn new(event_tx: Sender<(Position, CaptureEvent)>) -> Self {
+    pub(crate) fn new(event_tx: Sender<(Position, CaptureEvent)>) -> std::io::Result<Self> {
         let request_buffer = Default::default();
-        let (thread, thread_id) = start(event_tx, Arc::clone(&request_buffer));
-        Self {
+        let (thread, thread_id) = start(event_tx, Arc::clone(&request_buffer))?;
+        Ok(Self {
             request_buffer,
             thread: Some(thread),
             thread_id,
-        }
+        })
     }
 
     pub(crate) fn release_capture(&self) {
@@ -63,8 +63,8 @@ impl EventThread {
         self.client_update(ClientUpdate::Destroy(pos));
     }
 
-    fn exit(&self) {
-        self.signal(RequestType::Exit);
+    fn exit(&self) -> bool {
+        self.signal(RequestType::Exit)
     }
 
     fn client_update(&self, request: ClientUpdate) {
@@ -75,16 +75,27 @@ impl EventThread {
         self.signal(RequestType::ClientUpdate);
     }
 
-    fn signal(&self, event_type: RequestType) {
+    fn signal(&self, event_type: RequestType) -> bool {
         let id = self.thread_id;
-        unsafe { PostThreadMessageW(id, WM_USER, WPARAM(event_type as usize), LPARAM(0)).unwrap() };
+        if unsafe { PostThreadMessageW(id, WM_USER, WPARAM(event_type as usize), LPARAM(0)) }
+            .is_err()
+        {
+            OVERFLOW.store(true, Ordering::Release);
+            return false;
+        }
+        true
     }
 }
 
 impl Drop for EventThread {
     fn drop(&mut self) {
-        self.exit();
-        let _ = self.thread.take().expect("thread").join();
+        let posted = self.exit();
+        match self.thread.take() {
+            Some(thread) if posted || thread.is_finished() => {
+                let _ = thread.join();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -138,7 +149,19 @@ fn get_msg() -> Option<MSG> {
         match ret.0 {
             0 => None,
             x if x > 0 => Some(msg),
-            _ => panic!("error in GetMessageW"),
+            _ => {
+                OVERFLOW.store(true, Ordering::Release);
+                None
+            }
+        }
+    }
+}
+
+struct Hook(HHOOK);
+impl Drop for Hook {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnhookWindowsHookEx(self.0);
         }
     }
 }
@@ -146,47 +169,34 @@ fn get_msg() -> Option<MSG> {
 fn start(
     event_tx: Sender<(Position, CaptureEvent)>,
     request_buffer: Arc<Mutex<Vec<ClientUpdate>>>,
-) -> (thread::JoinHandle<()>, u32) {
-    /* condition variable to wait for thead id */
-    let thread_id = Arc::new((Condvar::new(), Mutex::new(None)));
-    let thread_id_ = Arc::clone(&thread_id);
-
-    let msg_thread = thread::spawn(|| start_routine(thread_id_, event_tx, request_buffer));
-
-    /* wait for thread to set its id */
-    let (cond, thread_id) = &*thread_id;
-    let mut thread_id = thread_id.lock().unwrap();
-    while (*thread_id).is_none() {
-        thread_id = cond.wait(thread_id).expect("channel closed");
-    }
-    (msg_thread, thread_id.expect("thread id"))
+) -> std::io::Result<(thread::JoinHandle<()>, u32)> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let msg_thread = thread::spawn(move || {
+        if let Err(error) = start_routine(ready_tx.clone(), event_tx, request_buffer) {
+            let _ = ready_tx.send(Err(std::io::Error::other(error.to_string())));
+        }
+    });
+    let id = ready_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| std::io::Error::other("Windows capture thread did not initialize"))??;
+    Ok((msg_thread, id))
 }
 
 fn start_routine(
-    ready: Arc<(Condvar, Mutex<Option<u32>>)>,
+    ready: std::sync::mpsc::SyncSender<std::io::Result<u32>>,
     event_tx: Sender<(Position, CaptureEvent)>,
     request_buffer: Arc<Mutex<Vec<ClientUpdate>>>,
-) {
+) -> windows::core::Result<()> {
     EVENT_TX.replace(Some(event_tx));
-    /* communicate thread id */
-    {
-        let (cnd, mtx) = &*ready;
-        let mut ready = mtx.lock().unwrap();
-        *ready = Some(unsafe { GetCurrentThreadId() });
-        cnd.notify_one();
-    }
-
     let mouse_proc: HOOKPROC = Some(mouse_proc);
     let kybrd_proc: HOOKPROC = Some(kybrd_proc);
     let window_proc: WNDPROC = Some(window_proc);
 
     /* register hooks */
-    unsafe {
-        let _ = SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, None, 0).unwrap();
-        let _ = SetWindowsHookExW(WH_KEYBOARD_LL, kybrd_proc, None, 0).unwrap();
-    }
+    let _mouse_hook = Hook(unsafe { SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, None, 0)? });
+    let _keyboard_hook = Hook(unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, kybrd_proc, None, 0)? });
 
-    let instance = unsafe { GetModuleHandleW(None).unwrap() };
+    let instance = unsafe { GetModuleHandleW(None)? };
     let instance = instance.into();
     let window_class: WNDCLASSW = WNDCLASSW {
         lpfnWndProc: window_proc,
@@ -204,7 +214,7 @@ fn start_routine(
         unsafe {
             let ret = RegisterClassW(&window_class);
             if ret == 0 {
-                panic!("RegisterClassW");
+                return Err(windows::core::Error::from_win32());
             }
         }
     }
@@ -224,9 +234,11 @@ fn start_routine(
             None,
             Some(instance),
             None,
-        )
-        .expect("CreateWindowExW");
+        )?;
     }
+
+    // Only report readiness after hooks and the message queue exist.
+    let _ = ready.send(Ok(unsafe { GetCurrentThreadId() }));
 
     /* run message loop */
     while let Some(msg) = get_msg() {
@@ -262,6 +274,7 @@ fn start_routine(
             }
         }
     }
+    Ok(())
 }
 
 fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
@@ -304,7 +317,6 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
     ENTRY_POINT.replace(entry_point);
 
     /* notify main thread */
-    log::debug!("ENTERED @ {prev_pos:?} -> {curr_pos:?}");
     let active = ACTIVE_CLIENT.get().expect("active client");
     blocking_send_event(
         active,
