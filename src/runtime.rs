@@ -173,6 +173,21 @@ impl Context {
 struct Target {
     address: String,
     expected: Option<String>,
+    learned: Rc<RefCell<Option<String>>>,
+}
+impl Target {
+    fn new(address: String, expected: Option<String>) -> Self {
+        Self {
+            address,
+            expected,
+            learned: Rc::new(RefCell::new(None)),
+        }
+    }
+    fn expected(&self) -> Option<String> {
+        self.expected
+            .clone()
+            .or_else(|| self.learned.borrow().clone())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -241,8 +256,8 @@ async fn work(
                     Command::CancelPin=>{ctx.offer.borrow_mut().take();let _=ctx.events.try_send(Event::PinClosed);Ok(())},
                     Command::Enable=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));ctx.status("Sharing allowed for trusted devices");Ok(())},
                     Command::Probe=>{let events=ctx.events.clone();tasks.spawn_local(async move{let message=match crate::input::Backend::new().await{Ok(mut b)=>{let text=format!("{} — {:.0} × {:.0} logical units; constructor check only",b.label,b.display.width,b.display.height);match b.close().await{Ok(())=>text,Err(e)=>format!("Backend cleanup failed: {e}")}},Err(e)=>format!("Backend unavailable: {e:#}")};let _=events.try_send(Event::Backend(message));});Ok(())},
-                    Command::Pair{address,pin,expected}=>{let context=ctx.clone();let flag=outbound.clone();if flag.replace(true){Err(anyhow!("An outgoing connection is already in progress"))}else{tasks.spawn_local(async move{let result=outgoing(context.clone(),Target{address,expected},Some(pin)).await;flag.set(false);if let Err(e)=result{context.status(format!("Pairing failed: {e}"));}});Ok(())}},
-                    Command::Connect{address,expected}=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));desired=Some(Target{address,expected});reconnect.reset_immediately();Ok(())},
+                    Command::Pair{address,pin,expected}=>{let context=ctx.clone();let flag=outbound.clone();if flag.replace(true){Err(anyhow!("An outgoing connection is already in progress"))}else{tasks.spawn_local(async move{let result=outgoing(context.clone(),Target::new(address,expected),Some(pin)).await;flag.set(false);if let Err(e)=result{context.status(format!("Pairing failed: {e}"));}});Ok(())}},
+                    Command::Connect{address,expected}=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));desired=Some(Target::new(address,expected));reconnect.reset_immediately();Ok(())},
                     Command::Revoke(fp)=>{ctx.stop.send_modify(|e|*e=e.wrapping_add(1));let result=ctx.store.borrow_mut().revoke(&fp);ctx.trusted_update();result},
                     Command::Layout{fingerprint,layout}=>{let result=ctx.store.borrow_mut().set_layout(&fingerprint,layout);ctx.trusted_update();result},
                 };if let Err(e)=result{ctx.status(e.to_string());}
@@ -262,6 +277,7 @@ async fn work(
             },
             _=reconnect.tick()=>{
                 if ctx.enabled.get() && ctx.session.available_permits()>0 && !outbound.get() && let Some(mut target)=desired.clone(){
+                        target.expected=target.expected();
                         if let Some(fp)=&target.expected {
                             if !ctx.store.borrow().trusted(fp){desired=None;continue;}
                             if let Some(peer)=peers.iter().find(|p|&p.fingerprint==fp) && let Some(address)=peer.addresses.first(){target.address=address.to_string();}
@@ -301,7 +317,7 @@ async fn outgoing(ctx: Rc<Context>, target: Target, pin: Option<Zeroizing<String
     let pairing = pin.is_some();
     let auth = async {
         let stream = connect(&target.address).await?;
-        let config = tls::client(&ctx.identity, target.expected)?;
+        let config = tls::client(&ctx.identity, target.expected())?;
         let stream = TlsConnector::from(config)
             .connect(
                 rustls::pki_types::ServerName::try_from("ravel.local")?,
@@ -312,6 +328,7 @@ async fn outgoing(ctx: Rc<Context>, target: Target, pin: Option<Zeroizing<String
     };
     let result = tokio::select! {_=stop.changed()=>return Ok(()),r=tokio::time::timeout(Duration::from_secs(if pairing{310}else{15}),auth)=>r??};
     if let Some((stream, fp)) = result {
+        *target.learned.borrow_mut() = Some(fp.clone());
         control(ctx, stream, fp, true, stop).await?;
     }
     Ok(())

@@ -18,6 +18,7 @@ pub struct Peer {
 }
 pub struct Discovery {
     daemon: ServiceDaemon,
+    fullname: String,
 }
 
 pub fn lan_ip(ip: IpAddr) -> bool {
@@ -62,8 +63,9 @@ impl Discovery {
             &[("name", name), ("fp", fp), ("version", "1")][..],
         )?
         .enable_addr_auto();
+        let fullname = info.get_fullname().to_owned();
         daemon.register(info)?;
-        Ok(Self { daemon })
+        Ok(Self { daemon, fullname })
     }
     pub async fn run(self, own_fp: String, updates: mpsc::Sender<Vec<Peer>>) -> Result<()> {
         let receiver = self.daemon.browse(SERVICE)?;
@@ -97,6 +99,8 @@ impl Discovery {
 }
 impl Drop for Discovery {
     fn drop(&mut self) {
+        // Exit alone does not withdraw advertised records. Commands are FIFO.
+        let _ = self.daemon.unregister(&self.fullname);
         let _ = self.daemon.shutdown();
     }
 }

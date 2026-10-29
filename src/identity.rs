@@ -92,10 +92,11 @@ impl Identity {
             let CertifiedKey { cert, signing_key } =
                 generate_simple_self_signed(vec!["ravel.local".into()])?;
             let key = Zeroizing::new(signing_key.serialize_der());
+            let protected = Zeroizing::new(protect(&key)?);
             let stored = StoredIdentity {
                 version: 1,
                 certificate: hex::encode(cert.der()),
-                protected_key: hex::encode(protect(&key)?),
+                protected_key: hex::encode(protected.as_slice()),
             };
             let encoded = Zeroizing::new(serde_json::to_vec(&stored)?);
             if let Err(error) = atomic_private(&path, &encoded, false)
@@ -114,7 +115,8 @@ impl Identity {
             !cert.is_empty() && cert.len() <= 2048,
             "Invalid identity certificate"
         );
-        let key = Zeroizing::new(unprotect(&hex::decode(&stored.protected_key)?)?);
+        let protected = Zeroizing::new(hex::decode(&stored.protected_key)?);
+        let key = Zeroizing::new(unprotect(&protected)?);
         // Parsing the key now makes corruption a startup failure.
         rustls::crypto::ring::sign::any_supported_type(&PrivateKeyDer::Pkcs8(
             PrivatePkcs8KeyDer::from(key.to_vec()),
@@ -190,6 +192,10 @@ fn dpapi(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>> {
             )?;
         }
         let result = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        zeroize::Zeroize::zeroize(std::slice::from_raw_parts_mut(
+            output.pbData,
+            output.cbData as usize,
+        ));
         let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
         Ok(result)
     }
