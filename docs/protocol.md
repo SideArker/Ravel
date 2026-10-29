@@ -62,7 +62,9 @@ another Enter. Receiving disables capture to prevent echo. All keys, modifiers
 and mouse buttons are released on leave, error, stop, timeout and normal exit.
 
 Heartbeats every 1 second, inbound inactivity timeout 4 seconds. Read/write and
-handshake operations have deadlines. Input queues are bounded; congestion closes
+handshake operations have deadlines. The complete display exchange (write and
+read) has a five-second deadline and is interruptible by stop before capture is
+armed. Trust and stop state are checked again after that exchange. Input queues are bounded; congestion closes
 the session rather than dropping key-up events. Ctrl+Alt+Shift+Esc stops sharing
 while capture is active; the GUI always has a stop/disconnect button. Input and
 secret payloads are never logged. The OS can still revoke grabs/permissions or

@@ -8,6 +8,7 @@ struct Session {
     capture: mpsc::Sender<CaptureEvent>,
     trace: Rc<TestTrace>,
     stop: watch::Sender<u64>,
+    store: Rc<RefCell<Store>>,
     _directory: tempfile::TempDir,
 }
 impl Session {
@@ -20,10 +21,11 @@ impl Session {
         let (status, mut statuses) = mpsc::channel(16);
         let (backend, capture, trace) = Backend::test();
         let (local, mut peer) = tokio::io::duplex(65536);
+        let store = Rc::new(RefCell::new(store));
         let signals = Signals {
             stop: receiver,
             stop_request: stop.clone(),
-            store: Rc::new(RefCell::new(store)),
+            store: store.clone(),
             fingerprint: fp,
             status,
         };
@@ -50,6 +52,7 @@ impl Session {
             capture,
             trace,
             stop,
+            store,
             _directory: directory,
         }
     }
@@ -253,6 +256,133 @@ async fn captured_motion_and_keyboard_use_the_control_stream() {
             session.stop.send_modify(|epoch| *epoch += 1);
             session.task.await.unwrap().unwrap();
             assert!(session.trace.state.borrow().closed);
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_display_write_has_a_deadline_and_closes_backend() {
+    stalled_display_exchange(false).await;
+}
+#[tokio::test(start_paused = true)]
+async fn stop_interrupts_stalled_display_write_and_closes_backend() {
+    stalled_display_exchange(true).await;
+}
+async fn stalled_display_exchange(stop_requested: bool) {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::load(directory.path()).unwrap();
+            let fingerprint = "ab".repeat(32);
+            store
+                .trust(fingerprint.clone(), "Test peer".into())
+                .unwrap();
+            let (stop, receiver) = watch::channel(0);
+            let (status, _) = mpsc::channel(16);
+            let signals = Signals {
+                stop: receiver,
+                stop_request: stop.clone(),
+                store: Rc::new(RefCell::new(store)),
+                fingerprint,
+                status,
+            };
+            // The peer neither reads nor writes. The first frame cannot fit.
+            let (stream, _peer) = tokio::io::duplex(1);
+            let (backend, _capture, trace) = Backend::test();
+            let mut task = tokio::task::spawn_local(run_with_backend(
+                stream,
+                Layout::default(),
+                true,
+                signals,
+                backend,
+            ));
+            tokio::task::yield_now().await;
+            if stop_requested {
+                stop.send_modify(|epoch| *epoch += 1);
+            } else {
+                tokio::time::advance(Duration::from_secs(6)).await;
+            }
+            let joined = tokio::time::timeout(Duration::from_secs(1), &mut task).await;
+            if joined.is_err() {
+                task.abort();
+                panic!("Display write remained stuck after timeout or stop");
+            }
+            let result = joined.unwrap().unwrap();
+            if stop_requested {
+                assert!(result.is_ok());
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Display exchange timed out")
+                );
+            }
+            assert!(trace.state.borrow().closed);
+            assert_eq!(trace.state.borrow().armed, None);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn revoked_peer_cannot_inject_another_event_and_held_inputs_are_released() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut session = Session::start().await;
+            session.hold_inputs().await;
+            session.store.borrow_mut().revoke(&"ab".repeat(32)).unwrap();
+            protocol::write(
+                &mut session.peer,
+                &Message::Input(Input::Key {
+                    code: 31,
+                    down: true,
+                }),
+            )
+            .await
+            .unwrap();
+            let error = session.task.await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("Peer trust revoked"));
+            Session::assert_released(&session.trace);
+            assert!(
+                !session.trace.state.borrow().injected.contains(&Input::Key {
+                    code: 31,
+                    down: true
+                })
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn leave_releases_inputs_and_restores_local_capture() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut session = Session::start().await;
+            session.hold_inputs().await;
+            protocol::write(&mut session.peer, &Message::Leave)
+                .await
+                .unwrap();
+            session
+                .trace
+                .wait_for(|state| state.armed == Some(Side::Right))
+                .await;
+            assert!(session.trace.state.borrow().injected.contains(&Input::Key {
+                code: 30,
+                down: false
+            }));
+            assert!(
+                session
+                    .trace
+                    .state
+                    .borrow()
+                    .injected
+                    .contains(&Input::Button {
+                        code: 0x110,
+                        down: false
+                    })
+            );
+            session.stop.send_modify(|epoch| *epoch += 1);
+            session.task.await.unwrap().unwrap();
         })
         .await;
 }

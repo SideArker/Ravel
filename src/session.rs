@@ -74,29 +74,27 @@ pub(crate) async fn run_with_backend<S: AsyncRead + AsyncWrite + Unpin + 'static
     mut backend: Backend,
 ) -> Result<()> {
     let result = async {
-        protocol::write(
-            &mut stream,
-            &Message::Ready {
-                display: backend.display,
-                layout,
-            },
-        )
-        .await?;
-        let Message::Ready {
-            display: remote_display,
-            layout: remote_layout,
-        } = tokio::time::timeout(Duration::from_secs(5), protocol::read(&mut stream)).await??
-        else {
-            bail!("Expected display configuration");
+        ensure!(signals.store.borrow().trusted(&signals.fingerprint), "Peer trust revoked");
+        ensure!(!signals.stop.has_changed()?, "Sharing was stopped");
+        let exchange = async {
+            backend.display.validate()?;
+            layout.validate()?;
+            protocol::write(&mut stream, &Message::Ready { display: backend.display, layout }).await?;
+            let Message::Ready { display: remote_display, layout: remote_layout } = protocol::read(&mut stream).await? else { bail!("Expected display configuration"); };
+            remote_display.validate()?;
+            remote_layout.validate()?;
+            let layout = if initiator { layout } else { remote_layout.reciprocal() };
+            layout.validate()?;
+            Ok::<_, anyhow::Error>((remote_display, layout))
         };
-        remote_display.validate()?;
-        remote_layout.validate()?;
-        let layout = if initiator {
-            layout
-        } else {
-            remote_layout.reciprocal()
-        };
-        layout.validate()?;
+        let Some((remote_display, layout)) = (tokio::select! {
+            biased;
+            _ = signals.stop.changed() => None,
+            result = tokio::time::timeout(Duration::from_secs(5), exchange) => Some(result.map_err(|_| anyhow!("Display exchange timed out"))??),
+        }) else { return Ok(()); };
+        // Trust or stop may have changed while display negotiation was pending.
+        ensure!(signals.store.borrow().trusted(&signals.fingerprint), "Peer trust revoked");
+        ensure!(!signals.stop.has_changed()?, "Sharing was stopped");
         signals
             .store
             .borrow_mut()
