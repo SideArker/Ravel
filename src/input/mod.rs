@@ -35,6 +35,11 @@ enum Platform {
     X11(x11::X11),
     #[cfg(windows)]
     Windows(InputCapture),
+    #[cfg(test)]
+    Test {
+        events: tokio::sync::mpsc::Receiver<CaptureEvent>,
+        trace: std::rc::Rc<TestTrace>,
+    },
 }
 impl Backend {
     pub async fn new() -> Result<Self> {
@@ -106,6 +111,11 @@ impl Backend {
             Platform::Wayland { capture, .. } => arm_native(capture, &mut self.armed, side).await?,
             #[cfg(windows)]
             Platform::Windows(capture) => arm_native(capture, &mut self.armed, side).await?,
+            #[cfg(test)]
+            Platform::Test { trace, .. } => {
+                trace.state.borrow_mut().armed = side;
+                trace.changed.notify_one();
+            }
         }
         Ok(())
     }
@@ -117,6 +127,11 @@ impl Backend {
             Platform::Wayland { capture, .. } => next_native(capture).await,
             #[cfg(windows)]
             Platform::Windows(capture) => next_native(capture).await,
+            #[cfg(test)]
+            Platform::Test { events, .. } => events
+                .recv()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("Test capture closed")),
         }
     }
     pub async fn release_capture(&mut self) -> Result<()> {
@@ -127,11 +142,15 @@ impl Backend {
             Platform::Wayland { capture, .. } => capture.release().await?,
             #[cfg(windows)]
             Platform::Windows(capture) => capture.release().await?,
+            #[cfg(test)]
+            Platform::Test { .. } => {}
         }
         Ok(())
     }
     pub fn maintenance(&mut self) -> Result<bool> {
         match &mut self.platform {
+            #[cfg(test)]
+            Platform::Test { .. } => Ok(false),
             #[cfg(target_os = "linux")]
             Platform::X11(x) => x.emergency_stop(),
             #[cfg(target_os = "linux")]
@@ -153,6 +172,8 @@ impl Backend {
     }
     pub fn check_geometry(&self) -> Result<()> {
         match &self.platform {
+            #[cfg(test)]
+            Platform::Test { .. } => {}
             #[cfg(target_os = "linux")]
             Platform::X11(x) => x.check_geometry()?,
             #[cfg(target_os = "linux")]
@@ -199,6 +220,16 @@ impl Backend {
             Platform::Wayland { injector, .. } => injector.inject(event),
             #[cfg(windows)]
             Platform::Windows(_) => windows::inject(event),
+            #[cfg(test)]
+            Platform::Test { trace, .. } => {
+                let mut state = trace.state.borrow_mut();
+                state.injected.push(event);
+                let fail = std::mem::take(&mut state.fail_next);
+                drop(state);
+                trace.changed.notify_one();
+                ensure!(!fail, "Test injection failure");
+                Ok(())
+            }
         }
     }
     pub fn release_input(&mut self) -> Result<()> {
@@ -227,6 +258,11 @@ impl Backend {
             Platform::Wayland { capture, .. } => capture.terminate().await?,
             #[cfg(windows)]
             Platform::Windows(capture) => capture.terminate().await?,
+            #[cfg(test)]
+            Platform::Test { trace, .. } => {
+                trace.state.borrow_mut().closed = true;
+                trace.changed.notify_one();
+            }
             #[cfg(target_os = "linux")]
             Platform::X11(_) => {}
         }
@@ -450,5 +486,69 @@ mod native_tests {
             .unwrap();
         assert_eq!(grabbed.status, GrabStatus::SUCCESS);
         observer.ungrab_keyboard(0u32).unwrap().check().unwrap();
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestState {
+    pub injected: Vec<Input>,
+    pub armed: Option<Side>,
+    pub closed: bool,
+    pub fail_next: bool,
+}
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestTrace {
+    pub state: std::cell::RefCell<TestState>,
+    pub changed: tokio::sync::Notify,
+}
+#[cfg(test)]
+impl TestTrace {
+    pub async fn wait_for(&self, condition: impl Fn(&TestState) -> bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let changed = self.changed.notified();
+                if condition(&self.state.borrow()) {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("Session did not reach the expected input state");
+    }
+}
+#[cfg(test)]
+impl Backend {
+    pub(crate) fn test() -> (
+        Self,
+        tokio::sync::mpsc::Sender<CaptureEvent>,
+        std::rc::Rc<TestTrace>,
+    ) {
+        let (tx, events) = tokio::sync::mpsc::channel(128);
+        let trace = std::rc::Rc::new(TestTrace::default());
+        (
+            Self {
+                platform: Platform::Test {
+                    events,
+                    trace: trace.clone(),
+                },
+                display: Display {
+                    x: 0.,
+                    y: 0.,
+                    width: 1000.,
+                    height: 800.,
+                    scale: 1.,
+                },
+                label: "Test input",
+                held: Held::default(),
+                armed: false,
+                #[cfg(windows)]
+                repeat: None,
+            },
+            tx,
+            trace,
+        )
     }
 }

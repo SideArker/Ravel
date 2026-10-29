@@ -51,10 +51,10 @@ impl Direction {
 }
 
 pub async fn run<S: AsyncRead + AsyncWrite + Unpin + 'static>(
-    mut stream: S,
+    stream: S,
     layout: Layout,
     initiator: bool,
-    mut signals: Signals,
+    signals: Signals,
 ) -> Result<()> {
     // No OS capture/injection object exists before network authorization.
     ensure!(
@@ -62,7 +62,17 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin + 'static>(
         "Peer is not trusted"
     );
     ensure!(!signals.stop.has_changed()?, "Sharing was stopped");
-    let mut backend = Backend::new().await?;
+    let backend = Backend::new().await?;
+    run_with_backend(stream, layout, initiator, signals, backend).await
+}
+
+pub(crate) async fn run_with_backend<S: AsyncRead + AsyncWrite + Unpin + 'static>(
+    mut stream: S,
+    layout: Layout,
+    initiator: bool,
+    mut signals: Signals,
+    mut backend: Backend,
+) -> Result<()> {
     let result = async {
         protocol::write(
             &mut stream,
@@ -266,3 +276,6 @@ mod tests {
         assert!(s.receive_enter().is_err());
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
