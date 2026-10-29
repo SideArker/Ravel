@@ -112,3 +112,56 @@ mod tests {
         assert_eq!(resolve("192.168.1.2:4243").await.unwrap().len(), 1);
     }
 }
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    #[tokio::test]
+    #[ignore = "requires LAN multicast; publishes two temporary Ravel discovery services"]
+    async fn lan_discovery_resolves_and_removes_services() {
+        let a = hex::encode(rand::random::<[u8; 32]>());
+        let b = hex::encode(rand::random::<[u8; 32]>());
+        let da = Discovery::new("Discovery check A", &a, 30201).unwrap();
+        let db = Discovery::new("Discovery check B", &b, 30202).unwrap();
+        let (ta, mut ra) = mpsc::channel(32);
+        let (tb, _rb) = mpsc::channel(32);
+        let aa = a.clone();
+        let bb = b.clone();
+        let task_a = tokio::spawn(async move {
+            da.run(aa, ta).await.unwrap();
+        });
+        let task_b = tokio::spawn(async move {
+            db.run(bb, tb).await.unwrap();
+        });
+        let resolved = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let peers = ra.recv().await.unwrap();
+                if let Some(peer) = peers.iter().find(|p| p.fingerprint == b) {
+                    assert_eq!(peer.name, "Discovery check B");
+                    assert!(
+                        peer.addresses
+                            .iter()
+                            .all(|a| lan_ip(a.ip()) && a.port() == 30202)
+                    );
+                    break;
+                }
+            }
+        })
+        .await;
+        task_b.abort();
+        let _ = task_b.await;
+        let removed = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let peers = ra.recv().await.unwrap();
+                if peers.iter().all(|p| p.fingerprint != b) {
+                    break;
+                }
+            }
+        })
+        .await;
+        task_a.abort();
+        let _ = task_a.await;
+        assert!(resolved.is_ok(), "LAN multicast discovery failed");
+        assert!(removed.is_ok(), "Discovery removal failed");
+    }
+}
