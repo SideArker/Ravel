@@ -203,7 +203,6 @@ impl InputCapture {
 
     fn update_pressed_keys(&mut self, key: u32, state: u8) {
         if let Ok(scancode) = scancode::Linux::try_from(key) {
-            log::debug!("key: {key}, state: {state}, scancode: {scancode:?}");
             match state {
                 1 => self.pressed_keys.insert(scancode),
                 _ => self.pressed_keys.remove(&scancode),

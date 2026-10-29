@@ -305,12 +305,7 @@ impl LayerShellInputCapture {
         > = global_list
             .bind(&qh, 1..=1, ())
             .map_err(|e| WaylandBindError::new(e, "zwp_keyboard_shortcuts_inhibit_manager_v1"));
-        // layer-shell backend still works without this protocol so we make it an optional dependency
-        if let Err(e) = &shortcut_inhibit_manager {
-            log::warn!("shortcut_inhibit_manager not supported: {e}\nkeybinds handled by the compositor will not be passed
-                to the client");
-        }
-        let shortcut_inhibit_manager = shortcut_inhibit_manager.ok();
+        let shortcut_inhibit_manager = Some(shortcut_inhibit_manager?);
 
         let mut state = State {
             active_positions: Default::default(),
@@ -358,7 +353,8 @@ impl LayerShellInputCapture {
         state.read_guard = Some(read_guard);
 
         // The queue owns its socket and its descriptor remains stable until drop.
-        let inner = unsafe { AsyncFd::register(Inner { queue, state }) }.map_err(|e| e.into_parts().1)?;
+        let inner =
+            unsafe { AsyncFd::register(Inner { queue, state }) }.map_err(|e| e.into_parts().1)?;
 
         Ok(LayerShellInputCapture(inner))
     }

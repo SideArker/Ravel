@@ -20,11 +20,11 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DispatchMessageW, GetMessageW, PostThreadMessageW,
     RegisterClassW, SetWindowsHookExW, TranslateMessage, EDD_GET_DEVICE_INTERFACE_NAME, HOOKPROC,
-    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
-    WINDOW_STYLE, WM_DISPLAYCHANGE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW,
-    WNDPROC,
+    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE, WM_DISPLAYCHANGE, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WNDPROC,
 };
 
 use input_event::{
@@ -99,15 +99,21 @@ enum ClientUpdate {
     Destroy(Position),
 }
 
+pub(super) static OVERFLOW: AtomicBool = AtomicBool::new(false);
 fn blocking_send_event(pos: Position, event: CaptureEvent) {
-    EVENT_TX.with_borrow_mut(|tx| tx.as_mut().unwrap().blocking_send((pos, event)).unwrap())
+    let _ = try_send_event(pos, event);
 }
 
 fn try_send_event(
     pos: Position,
     event: CaptureEvent,
 ) -> Result<(), TrySendError<(Position, CaptureEvent)>> {
-    EVENT_TX.with_borrow_mut(|tx| tx.as_mut().unwrap().try_send((pos, event)))
+    let result = EVENT_TX.with_borrow_mut(|tx| tx.as_mut().unwrap().try_send((pos, event)));
+    if result.is_err() {
+        OVERFLOW.store(true, Ordering::Release);
+        ACTIVE_CLIENT.take();
+    }
+    result
 }
 
 thread_local! {
@@ -311,6 +317,13 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
 }
 
 unsafe extern "system" fn mouse_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if ncode < 0
+        || (*(lparam.0 as *const MSLLHOOKSTRUCT))
+            .flags
+            .contains(LLMHF_INJECTED)
+    {
+        return CallNextHookEx(None, ncode, wparam, lparam);
+    }
     let active = check_client_activation(wparam, lparam);
 
     /* no client was active */
@@ -338,6 +351,13 @@ unsafe extern "system" fn mouse_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM)
 }
 
 unsafe extern "system" fn kybrd_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if ncode < 0
+        || (*(lparam.0 as *const KBDLLHOOKSTRUCT))
+            .flags
+            .contains(LLKHF_INJECTED)
+    {
+        return CallNextHookEx(None, ncode, wparam, lparam);
+    }
     /* get active client if any */
     let Some(client) = ACTIVE_CLIENT.get() else {
         return CallNextHookEx(None, ncode, wparam, lparam);
@@ -443,20 +463,15 @@ fn update_clients(request: ClientUpdate) {
 fn to_key_event(wparam: WPARAM, lparam: LPARAM) -> Option<KeyboardEvent> {
     let kybrdllhookstruct: KBDLLHOOKSTRUCT = unsafe { *(lparam.0 as *const KBDLLHOOKSTRUCT) };
     let mut scan_code = kybrdllhookstruct.scanCode;
-    log::trace!("scan_code: {scan_code}");
     if kybrdllhookstruct.flags.contains(LLKHF_EXTENDED) {
         scan_code |= 0xE000;
     }
     let Ok(win_scan_code) = scancode::Windows::try_from(scan_code) else {
-        log::warn!("failed to translate to windows scancode: {scan_code}");
         return None;
     };
-    log::trace!("windows_scan: {win_scan_code:?}");
     let Ok(linux_scan_code): Result<Linux, ()> = win_scan_code.try_into() else {
-        log::warn!("failed to translate into linux scancode: {win_scan_code:?}");
         return None;
     };
-    log::trace!("windows_scan: {linux_scan_code:?}");
     let scan_code = linux_scan_code as u32;
     match wparam {
         WPARAM(p) if p == WM_KEYDOWN as usize => Some(KeyboardEvent::Key {
@@ -547,9 +562,6 @@ fn to_mouse_event(wparam: WPARAM, lparam: LPARAM) -> Option<PointerEvent> {
             axis: 1, // Horizontal
             value: mouse_low_level.mouseData as i32 >> 16,
         }),
-        w => {
-            log::warn!("unknown mouse event: {w:?}");
-            None
-        }
+        w => None,
     }
 }

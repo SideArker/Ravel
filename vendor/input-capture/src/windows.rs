@@ -41,7 +41,7 @@ impl Capture for WindowsInputCapture {
 
 impl WindowsInputCapture {
     pub(crate) fn new() -> Self {
-        let (event_tx, event_rx) = channel(10);
+        let (event_tx, event_rx) = channel(1024);
         let event_thread = EventThread::new(event_tx);
         Self {
             event_thread,
@@ -53,6 +53,12 @@ impl WindowsInputCapture {
 impl Stream for WindowsInputCapture {
     type Item = Result<(Position, CaptureEvent), CaptureError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if event_thread::OVERFLOW.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return Poll::Ready(Some(Err(std::io::Error::other(
+                "Input capture queue overflow",
+            )
+            .into())));
+        }
         match ready!(self.event_rx.poll_recv(cx)) {
             None => Poll::Ready(None),
             Some(e) => Poll::Ready(Some(Ok(e))),
