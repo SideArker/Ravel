@@ -1,9 +1,9 @@
 fn main() {
-    let unix = cfg!(unix);
+    let unix = std::env::var("CARGO_CFG_UNIX").is_ok();
     let layer_shell = cfg!(feature = "layer_shell");
     let libei = cfg!(feature = "libei");
     let x11 = cfg!(feature = "x11");
-    let macos = cfg!(target_os = "macos");
+    let macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
 
     let libei = unix && !macos && libei;
     let layer_shell = unix && !macos && layer_shell;

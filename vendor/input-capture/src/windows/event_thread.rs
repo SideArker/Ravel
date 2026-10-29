@@ -317,11 +317,7 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
 }
 
 unsafe extern "system" fn mouse_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if ncode < 0
-        || (*(lparam.0 as *const MSLLHOOKSTRUCT))
-            .flags
-            .contains(LLMHF_INJECTED)
-    {
+    if ncode < 0 || (*(lparam.0 as *const MSLLHOOKSTRUCT)).flags & LLMHF_INJECTED != 0 {
         return CallNextHookEx(None, ncode, wparam, lparam);
     }
     let active = check_client_activation(wparam, lparam);
@@ -562,6 +558,6 @@ fn to_mouse_event(wparam: WPARAM, lparam: LPARAM) -> Option<PointerEvent> {
             axis: 1, // Horizontal
             value: mouse_low_level.mouseData as i32 >> 16,
         }),
-        w => None,
+        _ => None,
     }
 }
