@@ -2,8 +2,10 @@ use crate::protocol::Input;
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::File,
-    io::Read,
-    os::fd::{AsFd, OwnedFd},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::fs::FileExt,
+    },
 };
 use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle, delegate_noop,
@@ -176,21 +178,9 @@ impl Dispatch<WlKeyboard, ()> for State {
             fd,
             size,
         } = event
+            && let Ok(text) = read_keymap(&fd, size)
         {
-            let read = || -> Result<String> {
-                ensure!(size <= 1_048_576, "Keymap too large");
-                let mut data = Vec::new();
-                File::from(fd.try_clone()?)
-                    .take(size as u64)
-                    .read_to_end(&mut data)?;
-                if data.last() == Some(&0) {
-                    data.pop();
-                }
-                Ok(String::from_utf8(data)?)
-            };
-            if let Ok(text) = read() {
-                state.keymap = Some((fd, size, text));
-            }
+            state.keymap = Some((fd, size, text));
         }
     }
 }
@@ -209,5 +199,38 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+fn read_keymap(fd: &OwnedFd, size: u32) -> Result<String> {
+    ensure!((1..=1_048_576).contains(&size), "Invalid keymap size");
+    let mut data = vec![0; size as usize];
+    // SCM_RIGHTS and dup share the file offset; never consume the compositor's fd.
+    File::from(fd.try_clone()?).read_exact_at(&mut data, 0)?;
+    if data.last() == Some(&0) {
+        data.pop();
+    }
+    Ok(String::from_utf8(data)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Seek, Write};
+    #[test]
+    fn keymap_read_does_not_consume_or_depend_on_shared_fd_offset() {
+        let mut file = tempfile::tempfile().unwrap();
+        let text = b"xkb_keymap { regression fixture };\0";
+        file.write_all(text).unwrap();
+        let position = file.stream_position().unwrap();
+        let fd: OwnedFd = file.try_clone().unwrap().into();
+        for _ in 0..2 {
+            assert_eq!(
+                read_keymap(&fd, text.len() as u32).unwrap().as_bytes(),
+                &text[..text.len() - 1]
+            );
+        }
+        assert_eq!(file.stream_position().unwrap(), position);
+        assert!(read_keymap(&fd, 1_048_577).is_err());
     }
 }

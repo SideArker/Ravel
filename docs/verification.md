@@ -22,7 +22,7 @@ laptops were not available, so input interoperability cannot be certified here.
 
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
-- `cargo test --workspace`: 20 passed, 2 environment-specific checks ignored by
+- `cargo test --workspace`: 21 passed, 2 environment-specific checks ignored by
   default; those two were run separately and passed as described below.
 - `cargo build --locked` and `cargo build --release --locked`: passed on Arch.
   A separate `git archive HEAD` source export also built with `cargo build
@@ -35,7 +35,11 @@ laptops were not available, so input interoperability cannot be certified here.
   first attempt failed because a MinGW C compiler was not installed. This does
   not link or run a native MSVC executable.
 - `ravel --probe-backend`: passed on the real Hyprland Wayland socket with one
-  1920×1080 logical output; no input was injected by this check.
+  1920×1080 logical output; no input was injected by this check. A repeated live
+  probe exposed a shared keymap-file offset bug: a normal read through a duplicated
+  descriptor consumed the compositor-owned offset. Positional reads from offset
+  zero fixed it; a regression test verifies offset independence and preservation,
+  and consecutive live probes now pass.
 - `ravel --smoke-gui --port 0 --state-dir <temporary-directory>`: exit 0. Hyprland
   reported a native Wayland Ravel window. The desktop lock screen prevented a
   useful visible Wayland screenshot. An isolated X11 launch under Xvfb exited 0;
