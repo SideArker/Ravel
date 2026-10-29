@@ -69,10 +69,10 @@ impl App {
                 Event::Peers(peers) => self.peers = peers,
                 Event::Trusted(peers) => {
                     self.trusted = peers;
-                    if let Some(fp) = &self.selected {
-                        if let Some(peer) = self.trusted.get(fp) {
-                            self.layout = peer.layout;
-                        }
+                    if let Some(fp) = &self.selected
+                        && let Some(peer) = self.trusted.get(fp)
+                    {
+                        self.layout = peer.layout;
                     }
                 }
                 Event::Pin { value, deadline } => self.offer = Some((value, deadline)),
@@ -205,7 +205,8 @@ impl eframe::App for App {
                 ui.label(format!("The PIN exchange succeeded with {}.",c.name));ui.label("Compare this full fingerprint with the fingerprint shown locally on that device:");
                 ui.add(egui::Label::new(RichText::new(pretty_fingerprint(&c.fingerprint)).monospace()).selectable(true));
                 ui.label(format!("Approval expires in {}s",c.deadline.saturating_duration_since(Instant::now()).as_secs()));
-                ui.horizontal(|ui|{if ui.button("Fingerprints match — trust device").clicked(){answer=Some(true);}if ui.button("Reject").clicked(){answer=Some(false);}});
+                ui.horizontal(|ui|{if ui.button("Fingerprints match — trust device").clicked(){answer=Some(true);}
+                    if ui.button("Reject").clicked(){answer=Some(false);}});
             });
             if let Some(answer) = answer {
                 let c = self.confirmations.remove(0);

@@ -21,6 +21,8 @@ pub struct Backend {
     held: Held,
     armed: bool,
 }
+// A single backend lives for the session; boxing would add indirection to save a few hundred bytes.
+#[allow(clippy::large_enum_variant)]
 enum Platform {
     #[cfg(target_os = "linux")]
     Wayland {

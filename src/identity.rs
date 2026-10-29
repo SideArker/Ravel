@@ -8,14 +8,14 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use zeroize::Zeroizing;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 pub struct Identity {
     pub certificate: CertificateDer<'static>,
     key: Zeroizing<Vec<u8>>,
     pub fingerprint: String,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 struct StoredIdentity {
     version: u16,
@@ -98,10 +98,10 @@ impl Identity {
                 protected_key: hex::encode(protect(&key)?),
             };
             let encoded = Zeroizing::new(serde_json::to_vec(&stored)?);
-            if let Err(error) = atomic_private(&path, &encoded, false) {
-                if !path.try_exists()? {
-                    return Err(error);
-                }
+            if let Err(error) = atomic_private(&path, &encoded, false)
+                && !path.try_exists()?
+            {
+                return Err(error);
             }
         }
         let bytes = Zeroizing::new(
@@ -109,12 +109,12 @@ impl Identity {
         );
         let stored: StoredIdentity = serde_json::from_slice(&bytes)?;
         ensure!(stored.version == 1, "Unknown identity format");
-        let cert = hex::decode(stored.certificate)?;
+        let cert = hex::decode(&stored.certificate)?;
         ensure!(
             !cert.is_empty() && cert.len() <= 2048,
             "Invalid identity certificate"
         );
-        let key = Zeroizing::new(unprotect(&hex::decode(stored.protected_key)?)?);
+        let key = Zeroizing::new(unprotect(&hex::decode(&stored.protected_key)?)?);
         // Parsing the key now makes corruption a startup failure.
         rustls::crypto::ring::sign::any_supported_type(&PrivateKeyDer::Pkcs8(
             PrivatePkcs8KeyDer::from(key.to_vec()),
