@@ -1,0 +1,58 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxtst-dev libxkbcommon-dev libwayland-dev
+      - run: cargo build --release --locked
+      - name: Package Linux archive
+        run: |
+          mkdir -p stage/docs
+          install -m 755 target/release/ravel stage/ravel
+          cp README.md LICENSE stage/
+          cp docs/*.md stage/docs/
+          tar -czf ravel-linux-x86_64.tar.gz -C stage ravel README.md LICENSE docs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ravel-linux-x86_64
+          path: ravel-linux-x86_64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Package Windows archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path stage/docs -Force | Out-Null
+          Copy-Item target/release/ravel.exe, README.md, LICENSE stage/
+          Copy-Item docs/*.md stage/docs/
+          Compress-Archive -Path stage/* -DestinationPath ravel-windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ravel-windows-x86_64
+          path: ravel-windows-x86_64.zip
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: ravel-*
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes

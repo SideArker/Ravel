@@ -1,8 +1,16 @@
 # Build and package
 
-The initial packaging format is a native release binary plus documentation. There
-is no installer, service, autostart integration or code signing in this release.
-Do not distribute the state directory, identity keys, PINs, logs or `target` tree.
+Tagged releases publish a Linux x86_64 tarball and Windows x64 ZIP, with user-level
+install scripts in `install.sh` and `install.ps1`. These install the binary only;
+there is no service, autostart integration or code signing. Do not distribute the
+state directory, identity keys, PINs, logs or `target` tree.
+
+The Linux script installs to `~/.local/bin` (or `RAVEL_INSTALL_DIR`) and needs
+`curl`, `tar`, and `install`. The Windows script installs to
+`%LOCALAPPDATA%\Programs\Ravel` and adds that directory to the current user's PATH.
+Both scripts download the latest GitHub release. The Linux binary uses native GUI,
+X11 and libxkbcommon libraries; see the Arch package list below. The published
+binary targets are currently Linux x86_64 and Windows x64.
 
 ## Arch Linux
 
@@ -29,7 +37,7 @@ For a portable source-tree package, copy `target/release/ravel`, `README.md`,
 execute permission on the binary. Install it to a chosen user binary directory,
 then point the compositor stop binding at that absolute path. Source distribution
 must include the Cargo lockfile and GPL dependency provenance in `vendor/`.
-A real PKGBUILD should be added after the repository release URL is established.
+A real PKGBUILD is not included.
 
 ## Windows
 
