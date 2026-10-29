@@ -1,8 +1,10 @@
 pub mod discovery;
 pub mod geometry;
 pub mod identity;
+pub mod input;
 pub mod pairing;
 pub mod protocol;
+pub mod runtime;
+pub mod session;
 pub mod store;
 pub mod tls;
-pub mod input;
