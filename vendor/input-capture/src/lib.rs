@@ -2,30 +2,24 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Display,
     mem::swap,
-    task::{Poll, ready},
+    task::{ready, Poll},
 };
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures_core::Stream;
 
-use input_event::{Event, KeyboardEvent, scancode};
+use input_event::{scancode, Event, KeyboardEvent};
 
 pub use error::{CaptureCreationError, CaptureError, InputCaptureError};
 
 pub mod error;
-
-
-
-
 
 #[cfg(layer_shell)]
 mod layer_shell;
 
 #[cfg(windows)]
 mod windows;
-
-
 
 /// fallback input capture (does not produce events)
 mod dummy;
@@ -198,7 +192,9 @@ impl InputCapture {
         })
     }
 
-    pub fn bounds(&self) -> Option<[i32; 4]> { self.capture.bounds() }
+    pub fn bounds(&self) -> Option<[i32; 4]> {
+        self.capture.bounds()
+    }
 
     /// check whether the given keys are pressed
     pub fn keys_pressed(&self, keys: &[scancode::Linux]) -> bool {
@@ -277,7 +273,9 @@ impl Stream for InputCapture {
 
 #[async_trait]
 trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + Unpin {
-    fn bounds(&self) -> Option<[i32; 4]> { None }
+    fn bounds(&self) -> Option<[i32; 4]> {
+        None
+    }
     /// create a new client with the given id
     async fn create(&mut self, pos: Position) -> Result<(), CaptureError>;
 

@@ -5,7 +5,7 @@ use futures::Stream;
 use std::pin::Pin;
 
 use std::task::ready;
-use tokio::sync::mpsc::{Receiver, channel};
+use tokio::sync::mpsc::{channel, Receiver};
 
 use super::{Capture, CaptureError, CaptureEvent, Position};
 

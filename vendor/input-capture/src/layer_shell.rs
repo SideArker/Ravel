@@ -7,7 +7,7 @@ use std::{
     io::{self, ErrorKind},
     os::fd::{AsFd, RawFd},
     pin::Pin,
-    task::{Context, Poll, ready},
+    task::{ready, Context, Poll},
 };
 use tokio::io::unix::AsyncFd;
 
@@ -45,10 +45,9 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 
 use wayland_client::{
-    Connection, Dispatch, DispatchError, EventQueue, QueueHandle, WEnum,
     backend::{ReadEventsGuard, WaylandError},
     delegate_noop,
-    globals::{Global, GlobalList, GlobalListContents, registry_queue_init},
+    globals::{registry_queue_init, Global, GlobalList, GlobalListContents},
     protocol::{
         wl_buffer, wl_compositor,
         wl_keyboard::{self, WlKeyboard},
@@ -59,6 +58,7 @@ use wayland_client::{
         wl_seat, wl_shm, wl_shm_pool,
         wl_surface::WlSurface,
     },
+    Connection, Dispatch, DispatchError, EventQueue, QueueHandle, WEnum,
 };
 
 use input_event::{Event, KeyboardEvent, PointerEvent};
@@ -66,8 +66,8 @@ use input_event::{Event, KeyboardEvent, PointerEvent};
 use crate::{CaptureError, CaptureEvent};
 
 use super::{
-    Capture, Position,
     error::{LayerShellCaptureCreationError, WaylandBindError},
+    Capture, Position,
 };
 
 struct Globals {
@@ -357,7 +357,8 @@ impl LayerShellInputCapture {
         };
         state.read_guard = Some(read_guard);
 
-        let inner = AsyncFd::new(Inner { queue, state })?;
+        // The queue owns its socket and its descriptor remains stable until drop.
+        let inner = unsafe { AsyncFd::register(Inner { queue, state }) }.map_err(|e| e.into_parts().1)?;
 
         Ok(LayerShellInputCapture(inner))
     }
@@ -612,7 +613,9 @@ impl Inner {
 impl Capture for LayerShellInputCapture {
     fn bounds(&self) -> Option<[i32; 4]> {
         let outputs = &self.0.get_ref().state.outputs;
-        if outputs.len() != 1 { return None; }
+        if outputs.len() != 1 {
+            return None;
+        }
         let info = outputs[0].info.as_ref()?;
         Some([0, 0, info.size.0, info.size.1])
     }
@@ -754,7 +757,8 @@ impl Dispatch<WlPointer, ()> for State {
                     Position::Top => [surface_x, 0.0],
                     Position::Bottom => [surface_x, (window.size.1 - 1) as f64],
                 };
-                app.pending_events.push_back((pos, CaptureEvent::Begin { point }));
+                app.pending_events
+                    .push_back((pos, CaptureEvent::Begin { point }));
             }
             wl_pointer::Event::Leave { .. } => {
                 /* There are rare cases, where when a window is opened in

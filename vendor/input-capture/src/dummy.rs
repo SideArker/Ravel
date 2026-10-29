@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 use std::pin::Pin;
-use std::task::{Context, Poll, ready};
+use std::task::{ready, Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -62,7 +62,7 @@ impl Stream for DummyInputCapture {
         let event = match self.start {
             None => {
                 self.start.replace(current);
-                CaptureEvent::Begin
+                CaptureEvent::Begin { point: [0.5, 0.5] }
             }
             Some(start) => {
                 let elapsed = start.elapsed();
