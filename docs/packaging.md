@@ -55,7 +55,9 @@ The Linux-side `cargo check --target x86_64-pc-windows-gnu --all-targets` uses a
 cross C compiler/sysroot for ring. It checks conditional Rust code and API usage,
 but does not link an MSVC executable or prove DPAPI, hooks, GUI startup or physical
 input. The CI workflow defines native Windows jobs; merely adding that workflow
-is not evidence that it ran.
+is not evidence that it ran. The Linux job also runs the native X11 lifecycle
+check in an isolated Xvfb server using `xvfb-run`; it installs Xvfb and xauth
+explicitly so the input cleanup check does not depend on a desktop login.
 
 ## Isolated integration checks
 

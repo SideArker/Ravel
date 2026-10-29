@@ -13,7 +13,7 @@ laptops were not available, so input interoperability cannot be certified here.
 | Protocol and security state | Version 1 bounded JSON/TLS framing, threat model, certificate fingerprints, explicit pairing and control authorization, one-session ownership. | Independent review of the CPace/TLS identity binding and all injection paths. |
 | Pairing | Five-minute eight-digit single-use PIN, global five-attempt budget and backoff, CPace mutual confirmation bound to TLS exporter and both fingerprints, two explicit GUI approvals, private persisted identity/trust, revoke. Tests use real mutual TLS sockets. | Human pairing exercise on two actual machines, native Windows DPAPI behavior. |
 | Discovery/lifecycle | Actual LAN multicast resolution and graceful withdrawal passed; two-second interface checks, auto address updates, manual LAN-only resolution, fingerprint-pinned reconnect, timeouts, congestion/length checks. | Real DHCP reassignment, interface loss/return, multicast-blocked manual connection between laptops. |
-| Input transport | All input follows authorized TLS; capture disabled while receiving; held keys/buttons tracked and released; stop disables reconnect. Xvfb tested capture, injection, stop chord and cleanup. | Both physical directions across Windows ↔ X11 and Windows ↔ Wayland; modifiers, repeat, wheels, failures and disconnect under load. |
+| Input transport | All input follows authorized TLS; capture disabled while receiving; held keys/buttons tracked and released; stop disables reconnect. Full control-loop tests cover disconnect, stop, timeout, revocation, invalid input and injection errors; an actual mutual TLS test carries captured input and checks receiver cleanup. Xvfb tested capture, injection, stop chord and cleanup. | Both physical directions across Windows ↔ X11 and Windows ↔ Wayland; modifiers, repeat, wheels, failures and disconnect under load. |
 | Geometry | Four placements, reciprocal alignment, proportional mapping, nonoverlap rejection, persisted per-peer settings. Unit coverage includes negative origin, logical coordinates and invalid geometry. | Native mixed scale/DPI and edge calibration. More than one active output is intentionally unsupported. |
 | GUI/packaging | Arch release binary built; native Wayland window mapped and exited cleanly; isolated native X11 GUI screenshot inspected. Build/package documentation and native CI workflow added. | Native Windows GUI and packaged executable. The CI workflow has not been run remotely. |
 | Documentation/history | Protocol/threat model, backend provenance, operation, firewall, stop bindings, key storage, revocation, release exclusions and packaging documented. Scoped commit history and tracked file hygiene reviewed. | Release notes must be updated after physical certification. |
@@ -22,7 +22,7 @@ laptops were not available, so input interoperability cannot be certified here.
 
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
-- `cargo test --workspace`: 21 passed, 2 environment-specific checks ignored by
+- `cargo test --workspace`: 35 passed, 2 environment-specific checks ignored by
   default; those two were run separately and passed as described below.
 - `cargo build --locked` and `cargo build --release --locked`: passed on Arch.
   A separate `git archive HEAD` source export also built with `cargo build
@@ -53,6 +53,21 @@ laptops were not available, so input interoperability cannot be certified here.
   -- --ignored`: passed on this LAN. The first run failed removal; source tracing
   showed that mDNS shutdown does not withdraw advertisements. Ravel now unregisters
   the service before shutting down, and the unchanged check passed.
+- State-directory locking: a second owner is rejected, another directory remains
+  usable, dropping the guard permits restart, and Unix tests check private mode
+  and rejection of lock-file symlinks. The worker acquires its lock before loading
+  identity/trust state; Windows startup failures are displayed in a native dialog.
+- Session startup: a regression test first reproduced an indefinitely blocked
+  display-frame write. The complete exchange now has a five-second deadline and
+  stop cancellation; both stalled-write tests pass and verify backend closure.
+- Session lifecycle: test-only input adapters run the real event loop and held-input
+  tracking. Disconnect, stop, inactivity timeout, malformed frames, active revocation
+  and injection failure release held keys/buttons and disarm capture. Leave restores
+  local capture. An actual mutual TLS connection transports captured key/button
+  events between two session loops and proves receiver cleanup when the sender stops.
+  These tests do not simulate the platform APIs or certify physical input behavior.
+- Linux CI now defines an explicit Xvfb input lifecycle step in addition to the
+  ordinary suite. The same native test passes locally; remote CI has not been run.
 - Pairing/injection-gate tests: correct PIN plus both approvals succeeds; wrong,
   expired, reused, throttled and closed offers fail. Unknown, changed, revoked and
   stopped identities fail ordinary authorization. An untrusted input frame cannot
@@ -69,7 +84,7 @@ There is no clipboard/file transfer, cloud relay, IPv6, autostart or installer.
 Mixed scale pointer speed is not calibrated on real machines. Wayland receiver
 emergency stop requires the documented compositor binding; a generic unfocused
 global hotkey is not available to an arbitrary Wayland client. Concurrent app
-instances using one state directory are unsupported. Manual literal-IP fallback
+instances using one state directory are refused by an OS file lock. Manual literal-IP fallback
 cannot learn DHCP replacements while multicast remains blocked.
 
 TLS configuration and real TLS tests provide encryption/authentication evidence;
