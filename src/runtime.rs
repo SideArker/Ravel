@@ -592,7 +592,7 @@ mod tests {
     use super::*;
     use crate::pairing::PIN_LIFETIME;
 
-    fn context(name: &str) -> (tempfile::TempDir, Rc<Context>, mpsc::Receiver<Event>) {
+    pub(super) fn context(name: &str) -> (tempfile::TempDir, Rc<Context>, mpsc::Receiver<Event>) {
         let dir = tempfile::tempdir().unwrap();
         let identity = Arc::new(Identity::load_or_create(dir.path()).unwrap());
         let store = Rc::new(RefCell::new(Store::load(dir.path()).unwrap()));
@@ -611,7 +611,10 @@ mod tests {
         });
         (dir, ctx, receiver)
     }
-    async fn sockets(a: &Context, b: &Context) -> (TlsStream<TcpStream>, TlsStream<TcpStream>) {
+    pub(super) async fn sockets(
+        a: &Context,
+        b: &Context,
+    ) -> (TlsStream<TcpStream>, TlsStream<TcpStream>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = async {
@@ -795,5 +798,121 @@ mod tests {
         assert!(!offer.authorization_valid(lease.generation, now + PIN_LIFETIME));
         let other = Offer::new(now);
         assert!(!other.authorization_valid(lease.generation, now));
+    }
+}
+
+#[cfg(test)]
+mod control_transport_tests {
+    use super::*;
+    use crate::{
+        input::{Backend, CaptureEvent},
+        protocol::Input,
+    };
+    use input_event::{Event as InputEvent, KeyboardEvent, PointerEvent};
+
+    #[tokio::test]
+    async fn mutually_authenticated_tls_carries_input_and_disconnect_releases_receiver() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_da, a, _ea) = super::tests::context("Sender");
+                let (_db, b, _eb) = super::tests::context("Receiver");
+                a.store
+                    .borrow_mut()
+                    .trust(b.identity.fingerprint.clone(), "Receiver".into())
+                    .unwrap();
+                b.store
+                    .borrow_mut()
+                    .trust(a.identity.fingerprint.clone(), "Sender".into())
+                    .unwrap();
+                let (client, server) = super::tests::sockets(&a, &b).await;
+                let (client, server) = tokio::join!(
+                    authorize(a.clone(), client, true, None),
+                    authorize(b.clone(), server, false, None)
+                );
+                let (client, client_peer) = client.unwrap().unwrap();
+                let (server, server_peer) = server.unwrap().unwrap();
+                let signals = |ctx: &Context, fingerprint| {
+                    let (status, _) = mpsc::channel(16);
+                    Signals {
+                        stop: ctx.stop.subscribe(),
+                        stop_request: ctx.stop.clone(),
+                        store: ctx.store.clone(),
+                        fingerprint,
+                        status,
+                    }
+                };
+                let (backend_a, capture, trace_a) = Backend::test();
+                let (backend_b, _capture_b, trace_b) = Backend::test();
+                let ta = tokio::task::spawn_local(session::run_with_backend(
+                    client,
+                    Layout::default(),
+                    true,
+                    signals(&a, client_peer),
+                    backend_a,
+                ));
+                let tb = tokio::task::spawn_local(session::run_with_backend(
+                    server,
+                    Layout::default(),
+                    false,
+                    signals(&b, server_peer),
+                    backend_b,
+                ));
+                trace_a.wait_for(|state| state.armed.is_some()).await;
+                trace_b.wait_for(|state| state.armed.is_some()).await;
+                capture
+                    .send(CaptureEvent::Begin {
+                        point: [999., 400.],
+                    })
+                    .await
+                    .unwrap();
+                capture
+                    .send(CaptureEvent::Input(InputEvent::Keyboard(
+                        KeyboardEvent::Key {
+                            time: 0,
+                            key: 30,
+                            state: 1,
+                        },
+                    )))
+                    .await
+                    .unwrap();
+                capture
+                    .send(CaptureEvent::Input(InputEvent::Pointer(
+                        PointerEvent::Button {
+                            time: 0,
+                            button: 0x110,
+                            state: 1,
+                        },
+                    )))
+                    .await
+                    .unwrap();
+                trace_b
+                    .wait_for(|state| {
+                        state.injected.contains(&Input::Button {
+                            code: 0x110,
+                            down: true,
+                        })
+                    })
+                    .await;
+                assert_eq!(trace_b.state.borrow().armed, None);
+                assert!(trace_a.state.borrow().injected.is_empty());
+                a.stop.send_modify(|epoch| *epoch += 1);
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    ta.await.unwrap().unwrap();
+                    let _ = tb.await.unwrap();
+                })
+                .await
+                .unwrap();
+                let state = trace_b.state.borrow();
+                assert!(state.closed);
+                assert!(state.injected.contains(&Input::Key {
+                    code: 30,
+                    down: false
+                }));
+                assert!(state.injected.contains(&Input::Button {
+                    code: 0x110,
+                    down: false
+                }));
+            })
+            .await;
     }
 }
