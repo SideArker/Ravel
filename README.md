@@ -13,6 +13,7 @@ Rust 1.99+ is required (MSRV 1.99). On Arch:
 
 ```sh
 sudo pacman -S --needed base-devel pkgconf libx11 libxtst libxkbcommon mesa
+export PATH="$HOME/.cargo/bin:$PATH"
 rustup toolchain install stable --profile minimal
 rustup component add rustfmt clippy
 cargo build --locked

@@ -25,6 +25,9 @@ laptops were not available, so input interoperability cannot be certified here.
 - `cargo test --workspace`: 20 passed, 2 environment-specific checks ignored by
   default; those two were run separately and passed as described below.
 - `cargo build --locked` and `cargo build --release --locked`: passed on Arch.
+  A separate `git archive HEAD` source export also built with `cargo build
+  --locked`, sharing only the compiled dependency cache; it contained no untracked
+  project files or local identity state.
   The stripped Linux release executable is approximately 11.3 MiB.
 - `cargo check --target x86_64-pc-windows-gnu --all-targets`: passed. Also ran
   Clippy for that target with `-D warnings`. Used the installed Clang/LLVM tools

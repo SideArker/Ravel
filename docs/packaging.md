@@ -8,6 +8,7 @@ Do not distribute the state directory, identity keys, PINs, logs or `target` tre
 
 ```sh
 sudo pacman -S --needed base-devel pkgconf libx11 libxtst libxkbcommon mesa
+export PATH="$HOME/.cargo/bin:$PATH"
 rustup toolchain install stable --profile minimal
 rustup component add clippy rustfmt
 cargo fmt --all -- --check
