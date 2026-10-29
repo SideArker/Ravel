@@ -1,24 +1,43 @@
 # Ravel
 
 A native Rust desktop app for sharing a mouse and keyboard between two paired
-Windows / Linux devices on a LAN. **In development; native two-device acceptance
-checks are required before calling this a usable release.**
+Windows / Linux devices on a LAN. **Development build: the full two-laptop release
+acceptance checks are not yet complete.**
 
-Build with Rust 1.99 or newer (MSRV 1.99):
+Implemented: egui GUI, mDNS discovery/manual addressing, persistent certificate
+fingerprints and revocation, five-minute single-use CPace pairing with explicit
+fingerprint approvals, TLS 1.3 input sessions, edge layouts, disconnect cleanup,
+and native Windows, X11 and wlroots Wayland input paths.
+
+Rust 1.99+ is required (MSRV 1.99). On Arch:
 
 ```sh
+sudo pacman -S --needed base-devel pkgconf libx11 libxtst libxkbcommon mesa
 rustup toolchain install stable --profile minimal
 rustup component add rustfmt clippy
 cargo build --locked
-cargo run --locked
+cargo run --locked -- --name "Arch laptop"
 ```
 
-Linux build prerequisites: a C compiler, pkg-config, X11/XTest and xkbcommon
-libraries, and a working Wayland or X11 desktop. On Arch:
-`sudo pacman -S --needed base-devel pkgconf libx11 libxtst libxkbcommon mesa`.
-Windows uses the MSVC Rust target and Visual Studio Build Tools with C++ support.
+Use **Check input backend**, pair with a PIN, compare and approve fingerprints on
+both screens, configure the peer's edge, then allow sharing and connect. The GUI
+has **Stop / Disconnect**; local `ravel --stop` also disables control. Wayland users
+must configure the compositor stop binding described in the operation guide.
 
-The first implementation targets two devices, one contiguous display surface per
-device, wlroots-compatible Wayland, native X11, and Windows. Unsupported backends
-must fail closed. Clipboard, files, cloud services, installers and autostart are
-outside this release. Small coherent commits are made throughout development.
+The first scope is two devices with one active monitor each and private/link-local
+IPv4 networking. wlroots-compatible Wayland is implemented; GNOME/KDE portal-only
+sessions are unsupported. Windows and physical native X11/Wayland behavior still
+need two-device certification. No clipboard, files, mobile app, cloud services,
+installers or autostart are included.
+
+- [Pairing, backends, stop bindings and firewall setup](docs/operation.md)
+- [Protocol, limits and threat model](docs/protocol.md)
+- [Build and packaging on Arch / Windows](docs/packaging.md)
+- [Verification evidence and remaining release gates](docs/verification.md)
+- [Backend research and dependency provenance](docs/backend-feasibility.md)
+
+Validation: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo test --workspace`. The tests cover security state and geometry; desktop
+and multicast integration checks are opt-in. Source is GPL-3.0-or-later because
+Ravel reuses pinned lan-mouse capture and input-event code; see `vendor/README.md`.
