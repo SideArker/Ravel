@@ -14,6 +14,9 @@ pub enum Message {
         name: String,
         pairing: bool,
     },
+    PairDeadline {
+        remaining_secs: u16,
+    },
     Pake(Vec<u8>),
     Tag(Vec<u8>),
     Approved,
@@ -84,7 +87,7 @@ pub async fn read<R: AsyncRead + Unpin>(r: &mut R) -> Result<Message> {
     ensure!(len > 0 && len <= MAX_FRAME, "Invalid frame length");
     let mut bytes = vec![0; len];
     r.read_exact(&mut bytes).await?;
-    Ok(serde_json::from_slice(&bytes)?)
+    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("Malformed protocol message"))
 }
 pub async fn write<W: AsyncWrite + Unpin>(w: &mut W, message: &Message) -> Result<()> {
     let bytes = serde_json::to_vec(message)?;

@@ -34,6 +34,9 @@ impl Offer {
             consumed: false,
         }
     }
+    pub fn authorization_valid(&self, generation: u64, now: Instant) -> bool {
+        self.generation == generation && self.consumed && now < self.deadline
+    }
     pub fn display_pin(&self) -> String {
         self.pin.to_string()
     }

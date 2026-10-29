@@ -18,6 +18,7 @@ use tokio::{
 
 pub struct Signals {
     pub stop: watch::Receiver<u64>,
+    pub stop_request: watch::Sender<u64>,
     pub store: Rc<RefCell<Store>>,
     pub fingerprint: String,
     pub status: mpsc::Sender<String>,
@@ -169,7 +170,6 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
     backend.arm(Some(layout.side)).await?;
     loop {
         tokio::select! {
-            biased;
             _=signals.stop.changed()=>{let _=send(&outgoing,Message::Stop);return Ok(());},
             message=incoming.recv()=>{
                 ensure!(signals.store.borrow().trusted(&signals.fingerprint),"Peer trust revoked");
@@ -178,7 +178,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                     Message::Enter(p)=>{ensure!(point_valid(p),"Invalid entry point");direction.receive_enter()?;backend.arm(None).await?;backend.inject(Input::Motion{x:p[0],y:p[1]})?;let _=signals.status.try_send("Receiving remote input — Disconnect stops sharing".into());},
                     Message::Input(event)=>{direction.receive_input()?;backend.inject(event.validate()?)?;},
                     Message::Leave=>{direction.receive_leave()?;backend.release_input()?;rearm_at=Some(Instant::now()+Duration::from_millis(350));let _=signals.status.try_send("Connected — local control".into());},
-                    Message::Ping=>{},Message::Stop=>return Ok(()),
+                    Message::Ping=>{},Message::Stop=>{signals.stop_request.send_modify(|e| *e=e.wrapping_add(1));return Ok(());},
                     _=>bail!("Unexpected message in control session"),
                 }
             },
@@ -205,7 +205,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                                 point=[point[0].clamp(0.,1.),point[1].clamp(0.,1.)];send(&outgoing,Message::Input(Input::Motion{x:point[0],y:point[1]}))?;
                             }
                         }else if let Some(input)=convert(event) {
-                            input.validate()?;held.update(input);if held.emergency_stop(){let _=send(&outgoing,Message::Stop);return Ok(());}
+                            input.validate()?;held.update(input);if held.emergency_stop(){signals.stop_request.send_modify(|e| *e=e.wrapping_add(1));let _=send(&outgoing,Message::Stop);return Ok(());}
                             send(&outgoing,Message::Input(input))?;
                         }
                     }

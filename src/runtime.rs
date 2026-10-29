@@ -261,14 +261,12 @@ async fn work(
                 if ctx.offer.borrow().as_ref().is_some_and(|o|Instant::now()>=o.deadline){ctx.offer.borrow_mut().take();let _=ctx.events.try_send(Event::PinClosed);}
             },
             _=reconnect.tick()=>{
-                if ctx.enabled.get() && ctx.session.available_permits()>0 && !outbound.get() {
-                    if let Some(mut target)=desired.clone(){
+                if ctx.enabled.get() && ctx.session.available_permits()>0 && !outbound.get() && let Some(mut target)=desired.clone(){
                         if let Some(fp)=&target.expected {
                             if !ctx.store.borrow().trusted(fp){desired=None;continue;}
-                            if let Some(peer)=peers.iter().find(|p|&p.fingerprint==fp){if let Some(address)=peer.addresses.first(){target.address=address.to_string();}}
+                            if let Some(peer)=peers.iter().find(|p|&p.fingerprint==fp) && let Some(address)=peer.addresses.first(){target.address=address.to_string();}
                         }
                         outbound.set(true);let context=ctx.clone();let flag=outbound.clone();tasks.spawn_local(async move{let result=outgoing(context.clone(),target,None).await;flag.set(false);if let Err(e)=result{context.status(format!("Disconnected; retrying while sharing is allowed: {e}"));}});
-                    }
                 }
             }
         }
@@ -303,7 +301,7 @@ async fn outgoing(ctx: Rc<Context>, target: Target, pin: Option<Zeroizing<String
     let pairing = pin.is_some();
     let auth = async {
         let stream = connect(&target.address).await?;
-        let config = tls::client(&ctx.identity, if pairing { None } else { target.expected })?;
+        let config = tls::client(&ctx.identity, target.expected)?;
         let stream = TlsConnector::from(config)
             .connect(
                 rustls::pki_types::ServerName::try_from("ravel.local")?,
@@ -426,13 +424,23 @@ async fn authorize(
         server_fingerprint: server_fp,
         exporter: &exporter,
     };
-    let deadline = if let Some(pin) = pin {
+    let (deadline, offer_generation) = if let Some(pin) = pin {
+        let Message::PairDeadline { remaining_secs } =
+            tokio::time::timeout(Duration::from_secs(5), protocol::read(&mut stream)).await??
+        else {
+            bail!("Expected pairing deadline");
+        };
+        ensure!(
+            (1..=300).contains(&remaining_secs),
+            "Invalid pairing deadline"
+        );
+        let deadline = Instant::now() + Duration::from_secs(u64::from(remaining_secs));
         tokio::time::timeout(
             Duration::from_secs(15),
             pairing::exchange(&mut stream, &pin, binding, true),
         )
         .await??;
-        Instant::now() + pairing::PIN_LIFETIME
+        (deadline, None)
     } else {
         let lease = ctx
             .offer
@@ -440,11 +448,16 @@ async fn authorize(
             .as_mut()
             .ok_or_else(|| anyhow!("No pairing offer is open"))?
             .admit(Instant::now())?;
-        let result = tokio::time::timeout(
-            Duration::from_secs(15),
-            pairing::exchange(&mut stream, &lease.pin, binding, false),
-        )
-        .await;
+        let attempt = async {
+            let remaining_secs = lease
+                .deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs() as u16;
+            ensure!(remaining_secs > 0, "Pairing PIN expired");
+            protocol::write(&mut stream, &Message::PairDeadline { remaining_secs }).await?;
+            pairing::exchange(&mut stream, &lease.pin, binding, false).await
+        };
+        let result = tokio::time::timeout(Duration::from_secs(15), attempt).await;
         let success = matches!(result, Ok(Ok(())));
         let finished = ctx
             .offer
@@ -455,7 +468,7 @@ async fn authorize(
         finished?;
         result??;
         let _ = ctx.events.try_send(Event::PinClosed);
-        lease.deadline
+        (lease.deadline, Some(lease.generation))
     };
     let (reply, approval) = oneshot::channel();
     ctx.events
@@ -473,6 +486,14 @@ async fn authorize(
         approved && Instant::now() < deadline,
         "Fingerprint rejected or PIN authorization expired"
     );
+    ensure!(
+        offer_generation.is_none_or(|generation| ctx
+            .offer
+            .borrow()
+            .as_ref()
+            .is_some_and(|offer| offer.authorization_valid(generation, Instant::now()))),
+        "Pairing offer was cancelled or replaced"
+    );
     protocol::write(&mut stream, &Message::Approved).await?;
     ensure!(
         matches!(
@@ -486,6 +507,14 @@ async fn authorize(
         "Peer did not approve fingerprint"
     );
     ensure!(Instant::now() < deadline, "PIN authorization expired");
+    ensure!(
+        offer_generation.is_none_or(|generation| ctx
+            .offer
+            .borrow()
+            .as_ref()
+            .is_some_and(|offer| offer.authorization_valid(generation, Instant::now()))),
+        "Pairing offer was cancelled or replaced"
+    );
     ctx.store.borrow_mut().trust(fp.clone(), name)?;
     ctx.trusted_update();
     ctx.status(format!(
@@ -521,6 +550,7 @@ async fn control(
         initiator,
         Signals {
             stop,
+            stop_request: ctx.stop.clone(),
             store: ctx.store.clone(),
             fingerprint: fp,
             status: status_tx,
@@ -535,4 +565,215 @@ async fn control(
 
 pub fn request_stop(directory: &std::path::Path) -> Result<()> {
     crate::identity::atomic_private(&directory.join("stop.request"), b"stop", true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pairing::PIN_LIFETIME;
+
+    fn context(name: &str) -> (tempfile::TempDir, Rc<Context>, mpsc::Receiver<Event>) {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = Arc::new(Identity::load_or_create(dir.path()).unwrap());
+        let store = Rc::new(RefCell::new(Store::load(dir.path()).unwrap()));
+        let (events, receiver) = mpsc::channel(128);
+        let (stop, _) = watch::channel(0);
+        let ctx = Rc::new(Context {
+            identity,
+            store,
+            offer: RefCell::new(None),
+            events,
+            name: name.into(),
+            stop,
+            enabled: Cell::new(true),
+            session: Arc::new(Semaphore::new(1)),
+            handshakes: Arc::new(Semaphore::new(4)),
+        });
+        (dir, ctx, receiver)
+    }
+    async fn sockets(a: &Context, b: &Context) -> (TlsStream<TcpStream>, TlsStream<TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (s, _) = listener.accept().await.unwrap();
+            TlsStream::Server(
+                TlsAcceptor::from(tls::server(&b.identity).unwrap())
+                    .accept(s)
+                    .await
+                    .unwrap(),
+            )
+        };
+        let client = async {
+            let s = TcpStream::connect(address).await.unwrap();
+            TlsStream::Client(
+                TlsConnector::from(tls::client(&a.identity, None).unwrap())
+                    .connect(
+                        rustls::pki_types::ServerName::try_from("ravel.local").unwrap(),
+                        s,
+                    )
+                    .await
+                    .unwrap(),
+            )
+        };
+        let (server, client) = tokio::join!(server, client);
+        (client, server)
+    }
+    async fn approve(mut events: mpsc::Receiver<Event>, expected: String, decision: bool) {
+        while let Some(event) = events.recv().await {
+            if let Event::Confirm {
+                fingerprint, reply, ..
+            } = event
+            {
+                assert_eq!(fingerprint, expected);
+                let _ = reply.send(decision);
+                break;
+            }
+        }
+    }
+    async fn pair(decision_a: bool, decision_b: bool) -> (bool, bool, bool, bool) {
+        let (_da, a, ea) = context("Alice");
+        let (_db, b, eb) = context("Bob");
+        let offer = Offer::new(Instant::now());
+        let pin = Zeroizing::new(offer.display_pin());
+        *b.offer.borrow_mut() = Some(offer);
+        let (client, server) = sockets(&a, &b).await;
+        let ca = authorize(a.clone(), client, true, Some(pin));
+        let cb = authorize(b.clone(), server, false, None);
+        let approvals = async {
+            tokio::join!(
+                approve(ea, b.identity.fingerprint.clone(), decision_a),
+                approve(eb, a.identity.fingerprint.clone(), decision_b)
+            );
+        };
+        let (ra, rb, _) = tokio::join!(ca, cb, approvals);
+        let ta = a.store.borrow().trusted(&b.identity.fingerprint);
+        let tb = b.store.borrow().trusted(&a.identity.fingerprint);
+        (ra.is_ok(), rb.is_ok(), ta, tb)
+    }
+    #[tokio::test]
+    async fn tls_pairing_requires_both_fingerprint_approvals() {
+        assert_eq!(pair(true, true).await, (true, true, true, true));
+        assert_eq!(pair(false, true).await, (false, false, false, false));
+        assert_eq!(pair(true, false).await, (false, false, false, false));
+    }
+    #[tokio::test]
+    async fn wrong_expired_reused_throttled_and_closed_pins_never_trust() {
+        for scenario in ["wrong", "expired", "used", "throttled", "closed"] {
+            let (_da, a, _ea) = context("Alice");
+            let (_db, b, _eb) = context("Bob");
+            let now = Instant::now();
+            let mut offer = Offer::new(now);
+            let correct = offer.display_pin();
+            let pin = if scenario == "wrong" {
+                if correct == "00000000" {
+                    "11111111".into()
+                } else {
+                    "00000000".into()
+                }
+            } else {
+                correct
+            };
+            match scenario {
+                "expired" => offer.deadline = now - Duration::from_secs(1),
+                "used" => {
+                    let l = offer.admit(now).unwrap();
+                    offer.finish(l.generation, true, now).unwrap();
+                }
+                "throttled" => {
+                    let l = offer.admit(now).unwrap();
+                    offer.finish(l.generation, false, now).unwrap();
+                }
+                _ => {}
+            }
+            if scenario != "closed" {
+                *b.offer.borrow_mut() = Some(offer);
+            }
+            let (client, server) = sockets(&a, &b).await;
+            let (ra, rb) = tokio::join!(
+                authorize(a.clone(), client, true, Some(Zeroizing::new(pin))),
+                authorize(b.clone(), server, false, None)
+            );
+            assert!(ra.is_err() && rb.is_err(), "{scenario}");
+            assert!(!a.store.borrow().trusted(&b.identity.fingerprint));
+            assert!(!b.store.borrow().trusted(&a.identity.fingerprint));
+        }
+    }
+    #[tokio::test]
+    async fn ordinary_connections_reject_unknown_changed_revoked_and_stopped_peers() {
+        let (_da, a, _ea) = context("Alice");
+        let (_db, b, _eb) = context("Bob");
+        for trusted in [false, true] {
+            if trusted {
+                a.store
+                    .borrow_mut()
+                    .trust(b.identity.fingerprint.clone(), "Bob".into())
+                    .unwrap();
+                b.store
+                    .borrow_mut()
+                    .trust(a.identity.fingerprint.clone(), "Alice".into())
+                    .unwrap();
+            }
+            let (client, server) = sockets(&a, &b).await;
+            let (ra, rb) = tokio::join!(
+                authorize(a.clone(), client, true, None),
+                authorize(b.clone(), server, false, None)
+            );
+            assert_eq!(ra.is_ok(), trusted);
+            assert_eq!(rb.is_ok(), trusted);
+        }
+        a.store
+            .borrow_mut()
+            .revoke(&b.identity.fingerprint)
+            .unwrap();
+        let (client, server) = sockets(&a, &b).await;
+        let (ra, _) = tokio::join!(
+            authorize(a.clone(), client, true, None),
+            authorize(b.clone(), server, false, None)
+        );
+        assert!(ra.is_err());
+        let (_dc, c, _ec) = context("Bob");
+        let (client, server) = sockets(&a, &c).await;
+        let (ra, rb) = tokio::join!(
+            authorize(a.clone(), client, true, None),
+            authorize(c.clone(), server, false, None)
+        );
+        assert!(ra.is_err() && rb.is_err());
+        b.enabled.set(false);
+        let (client, server) = sockets(&a, &b).await;
+        let (_, rb) = tokio::join!(
+            authorize(a.clone(), client, true, None),
+            authorize(b.clone(), server, false, None)
+        );
+        assert!(rb.is_err());
+    }
+    #[tokio::test]
+    async fn untrusted_input_frame_cannot_pass_the_authorization_gate() {
+        let (_da, a, _ea) = context("Alice");
+        let (_db, b, _eb) = context("Bob");
+        let (mut client, server) = sockets(&a, &b).await;
+        let malicious = async {
+            protocol::write(
+                &mut client,
+                &Message::Input(crate::protocol::Input::Key {
+                    code: 30,
+                    down: true,
+                }),
+            )
+            .await
+            .unwrap();
+        };
+        let (_, result) = tokio::join!(malicious, authorize(b, server, false, None));
+        assert!(result.is_err());
+    }
+    #[test]
+    fn cancelled_and_replaced_offers_invalidate_pending_authorization() {
+        let now = Instant::now();
+        let mut offer = Offer::new(now);
+        let lease = offer.admit(now).unwrap();
+        offer.finish(lease.generation, true, now).unwrap();
+        assert!(offer.authorization_valid(lease.generation, now));
+        assert!(!offer.authorization_valid(lease.generation, now + PIN_LIFETIME));
+        let other = Offer::new(now);
+        assert!(!other.authorization_valid(lease.generation, now));
+    }
 }
