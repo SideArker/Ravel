@@ -27,7 +27,8 @@ laptops were not available, so input interoperability cannot be certified here.
 - `cargo build --locked` and `cargo build --release --locked`: passed on Arch.
   A separate `git archive HEAD` source export also built with `cargo build
   --locked`, sharing only the compiled dependency cache; it contained no untracked
-  project files or local identity state.
+  project files or local identity state. After the lifecycle follow-up, the full
+  35-test suite also passed from a fresh Git source export with the lockfile.
   The stripped Linux release executable is approximately 11.3 MiB.
 - `cargo check --target x86_64-pc-windows-gnu --all-targets`: passed. Also ran
   Clippy for that target with `-D warnings`. Used the installed Clang/LLVM tools
@@ -56,7 +57,10 @@ laptops were not available, so input interoperability cannot be certified here.
 - State-directory locking: a second owner is rejected, another directory remains
   usable, dropping the guard permits restart, and Unix tests check private mode
   and rejection of lock-file symlinks. The worker acquires its lock before loading
-  identity/trust state; Windows startup failures are displayed in a native dialog.
+  identity/trust state; Windows startup failures are displayed in a native dialog
+  (cross-compiled, not displayed on native Windows here). A release GUI smoke
+  check in isolated X11 also verified duplicate-process refusal, clean restart
+  and unchanged identity bytes.
 - Session startup: a regression test first reproduced an indefinitely blocked
   display-frame write. The complete exchange now has a five-second deadline and
   stop cancellation; both stalled-write tests pass and verify backend closure.
