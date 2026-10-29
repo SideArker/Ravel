@@ -197,9 +197,8 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                         if let Event::Pointer(PointerEvent::Motion{dx,dy,..})=event {
                             ensure!(dx.is_finite() && dy.is_finite() && dx.abs()<=32768. && dy.abs()<=32768.,"Invalid captured motion");
                             point[0]+=dx/(remote.width-1.);point[1]+=dy/(remote.height-1.);
-                            if layout.returns(point) {
+                            if layout.returns(point) && let Some(p)=layout.return_point([point[0].clamp(0.,1.),point[1].clamp(0.,1.)]) {
                                 send(&outgoing,Message::Leave)?;backend.arm(None).await?;
-                                let p=layout.return_point([point[0].clamp(0.,1.),point[1].clamp(0.,1.)]);
                                 backend.inject(Input::Motion{x:p[0],y:p[1]})?;held=Held::default();direction=Direction::Local;rearm_at=Some(Instant::now()+Duration::from_millis(350));
                             }else{
                                 point=[point[0].clamp(0.,1.),point[1].clamp(0.,1.)];send(&outgoing,Message::Input(Input::Motion{x:point[0],y:point[1]}))?;
@@ -212,7 +211,8 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                 }
             },
             _=heartbeat.tick()=>{backend.check_geometry()?;ensure!(signals.store.borrow().trusted(&signals.fingerprint),"Peer trust revoked");send(&outgoing,Message::Ping)?;},
-            _=tick.tick()=>{if rearm_at.is_some_and(|t|Instant::now()>=t) && direction==Direction::Local{backend.arm(Some(layout.side)).await?;rearm_at=None;}},
+            _=tick.tick()=>{if backend.maintenance()? {signals.stop_request.send_modify(|e| *e=e.wrapping_add(1));return Ok(());}
+                if rearm_at.is_some_and(|t|Instant::now()>=t) && direction==Direction::Local{backend.arm(Some(layout.side)).await?;rearm_at=None;}},
         }
     }
 }

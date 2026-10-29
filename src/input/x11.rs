@@ -73,6 +73,17 @@ impl X11 {
     pub fn display(&self) -> Display {
         self.display
     }
+    pub fn emergency_stop(&self) -> Result<bool> {
+        let keys = self.conn.query_keymap()?.reply()?.keys;
+        let pressed = |code: u8| {
+            let key = code + 8;
+            keys[key as usize / 8] & (1 << (key % 8)) != 0
+        };
+        Ok(pressed(1)
+            && (pressed(29) || pressed(97))
+            && (pressed(56) || pressed(100))
+            && (pressed(42) || pressed(54)))
+    }
     pub fn check_geometry(&self) -> Result<()> {
         ensure!(
             Self::geometry(&self.conn, self.root)? == self.display,

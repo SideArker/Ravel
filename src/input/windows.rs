@@ -104,3 +104,11 @@ fn mouse(dx: i32, dy: i32, data: u32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
         },
     }
 }
+
+pub fn emergency_stop() -> bool {
+    unsafe {
+        [VK_CONTROL, VK_MENU, VK_SHIFT, VK_ESCAPE]
+            .iter()
+            .all(|key| GetAsyncKeyState(i32::from(key.0)) < 0)
+    }
+}

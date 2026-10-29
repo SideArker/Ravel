@@ -20,6 +20,8 @@ pub struct Backend {
     pub label: &'static str,
     held: Held,
     armed: bool,
+    #[cfg(windows)]
+    repeat: Option<(u32, std::time::Instant)>,
 }
 // A single backend lives for the session; boxing would add indirection to save a few hundred bytes.
 #[allow(clippy::large_enum_variant)]
@@ -88,6 +90,7 @@ impl Backend {
                 label: "Windows: low-level hooks + SendInput",
                 held: Held::default(),
                 armed: false,
+                repeat: None,
             })
         }
         #[cfg(not(any(target_os = "linux", windows)))]
@@ -127,6 +130,27 @@ impl Backend {
         }
         Ok(())
     }
+    pub fn maintenance(&mut self) -> Result<bool> {
+        match &mut self.platform {
+            #[cfg(target_os = "linux")]
+            Platform::X11(x) => x.emergency_stop(),
+            #[cfg(target_os = "linux")]
+            Platform::Wayland { .. } => Ok(false),
+            #[cfg(windows)]
+            Platform::Windows(_) => {
+                if let Some((code, deadline)) = self.repeat
+                    && std::time::Instant::now() >= deadline
+                {
+                    windows::inject(Input::Key { code, down: true })?;
+                    self.repeat = Some((
+                        code,
+                        std::time::Instant::now() + std::time::Duration::from_millis(32),
+                    ));
+                }
+                Ok(windows::emergency_stop())
+            }
+        }
+    }
     pub fn check_geometry(&self) -> Result<()> {
         match &self.platform {
             #[cfg(target_os = "linux")]
@@ -154,6 +178,17 @@ impl Backend {
         if !self.held.update(event) {
             return Ok(());
         }
+        #[cfg(windows)]
+        if let Input::Key { code, down } = event {
+            if down && ![29, 42, 54, 56, 97, 100, 125, 126, 58, 69, 70].contains(&code) {
+                self.repeat = Some((
+                    code,
+                    std::time::Instant::now() + std::time::Duration::from_millis(500),
+                ));
+            } else if !down && self.repeat.is_some_and(|(key, _)| key == code) {
+                self.repeat = None;
+            }
+        }
         self.inject_raw(event)
     }
     fn inject_raw(&mut self, event: Input) -> Result<()> {
@@ -167,6 +202,10 @@ impl Backend {
         }
     }
     pub fn release_input(&mut self) -> Result<()> {
+        #[cfg(windows)]
+        {
+            self.repeat = None;
+        }
         let events = self.held.releases();
         let mut first = None;
         // Try every release even when a device refuses one event.
@@ -301,5 +340,115 @@ mod tests {
         assert_eq!(released.len(), 6);
         assert!(!h.emergency_stop());
         assert_eq!(h.releases().len(), 1);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod native_tests {
+    use super::*;
+    use x11rb::{
+        connection::Connection,
+        protocol::{
+            xproto::{ConnectionExt as _, GrabMode, GrabStatus, KeyButMask},
+            xtest::ConnectionExt as _,
+        },
+    };
+    #[tokio::test]
+    #[ignore = "requires isolated Xvfb, WAYLAND_DISPLAY unset and RAVEL_TEST_X11=1"]
+    async fn x11_edge_capture_injection_stop_and_cleanup() {
+        assert_eq!(std::env::var("RAVEL_TEST_X11").as_deref(), Ok("1"));
+        let (observer, screen) = x11rb::connect(None).unwrap();
+        let root = observer.setup().roots[screen].root;
+        let mut b = Backend::new().await.unwrap();
+        assert_eq!(b.label, "Native X11: grabs + XTest");
+        b.arm(Some(Side::Right)).await.unwrap();
+        b.inject(Input::Motion { x: 1., y: 0.5 }).unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), b.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let CaptureEvent::Begin { point } = event else {
+            panic!("Expected edge capture");
+        };
+        assert_eq!(point[0], b.display.width - 1.);
+        observer
+            .xtest_fake_input(
+                x11rb::protocol::xproto::KEY_PRESS_EVENT,
+                38,
+                0,
+                root,
+                0,
+                0,
+                0,
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        observer.flush().unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), b.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            CaptureEvent::Input(input_event::Event::Keyboard(
+                input_event::KeyboardEvent::Key {
+                    key: 30,
+                    state: 1,
+                    ..
+                }
+            ))
+        ));
+        observer
+            .xtest_fake_input(
+                x11rb::protocol::xproto::KEY_RELEASE_EVENT,
+                38,
+                0,
+                root,
+                0,
+                0,
+                0,
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        b.inject(Input::Key {
+            code: 30,
+            down: true,
+        })
+        .unwrap();
+        b.inject(Input::Button {
+            code: 0x110,
+            down: true,
+        })
+        .unwrap();
+        let keys = observer.query_keymap().unwrap().reply().unwrap().keys;
+        assert!(keys[38 / 8] & (1 << (38 % 8)) != 0);
+        for code in [1, 29, 56, 42] {
+            b.inject(Input::Key { code, down: true }).unwrap();
+        }
+        assert!(b.maintenance().unwrap());
+        b.close().await.unwrap();
+        let keys = observer.query_keymap().unwrap().reply().unwrap().keys;
+        for code in [30u8, 1, 29, 56, 42] {
+            let key = code + 8;
+            assert_eq!(keys[key as usize / 8] & (1 << (key % 8)), 0);
+        }
+        assert!(
+            !observer
+                .query_pointer(root)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .mask
+                .contains(KeyButMask::BUTTON1)
+        );
+        let grabbed = observer
+            .grab_keyboard(false, root, 0u32, GrabMode::ASYNC, GrabMode::ASYNC)
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(grabbed.status, GrabStatus::SUCCESS);
+        observer.ungrab_keyboard(0u32).unwrap().check().unwrap();
     }
 }

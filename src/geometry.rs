@@ -113,8 +113,8 @@ impl Layout {
             Side::Bottom => point[1] <= 0.0,
         }
     }
-    pub fn return_point(self, point: [f64; 2]) -> [f64; 2] {
-        self.reciprocal().enter(point).unwrap_or([0.5, 0.5])
+    pub fn return_point(self, point: [f64; 2]) -> Option<[f64; 2]> {
+        self.reciprocal().enter(point)
     }
 }
 
@@ -153,7 +153,7 @@ mod tests {
             };
             let p = [0.6, 0.7];
             let remote = l.enter(p).unwrap();
-            let back = l.return_point(remote);
+            let back = l.return_point(remote).unwrap();
             let axis = usize::from(side.horizontal());
             assert!((back[axis] - p[axis]).abs() < 1e-8);
             assert_eq!(l.reciprocal().reciprocal(), l);
@@ -166,5 +166,19 @@ mod tests {
             .enter([1., 0.2])
             .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod overlap_tests {
+    use super::*;
+    #[test]
+    fn nonoverlapping_return_edge_does_not_teleport_to_center() {
+        let layout = Layout {
+            side: Side::Right,
+            alignment: 0.5,
+        };
+        assert!(layout.return_point([0.0, 0.8]).is_none());
+        assert!(layout.return_point([0.0, 0.2]).is_some());
     }
 }
