@@ -105,10 +105,14 @@ can cause a failed connection, but it cannot authorize input.
 Default state is the per-user data-local directory resolved by `directories`:
 Linux normally `$XDG_DATA_HOME/ravel` or `~/.local/share/ravel`; Windows normally
 `%LOCALAPPDATA%\Ravel\Ravel\data`. `--state-dir PATH` selects an explicit directory.
-The directory contains `identity.json`, `peers.json` and transient `stop.request`.
+The directory contains `identity.json`, `peers.json`, `instance.lock` and transient
+`stop.request`. One process owns the directory at a time, using an OS file lock
+acquired before loading identity or trust state. A second instance is refused.
+Closing or crashing releases the lock automatically; the empty lock file remains
+and must not be deleted while the application is running.
 Linux enforces directory 0700 and files 0600; overly public files are refused.
 The private identity key is additionally protected with current-user DPAPI on
-Windows. Do not run concurrent instances against the same state directory.
+Windows. Use separate state directories only when separate device identities are intended.
 
 The PIN is single-use, lives only in memory, and expires five minutes after the
 receiver generates it. All admitted exchanges count toward a global five-attempt

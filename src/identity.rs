@@ -48,6 +48,34 @@ pub fn private_directory(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+/// Keep this file open for the lifetime of the worker. Never unlink a lock file:
+/// a second inode at the same path would permit a second owner.
+pub fn lock_directory(directory: &Path) -> Result<fs::File> {
+    private_directory(directory)?;
+    let path = directory.join("instance.lock");
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            read_private(&path)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    file.try_lock().map_err(|error| {
+        anyhow::anyhow!(
+            "Cannot lock Ravel state directory (another instance may be running): {error}"
+        )
+    })?;
+    Ok(file)
+}
+
 pub fn read_private(path: &Path) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
@@ -225,5 +253,35 @@ mod tests {
         )
         .unwrap();
         assert!(Identity::load_or_create(dir.path()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    #[test]
+    fn only_one_owner_per_state_directory_and_release_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let guard = lock_directory(dir.path()).unwrap();
+        assert!(lock_directory(dir.path()).is_err());
+        let _other_guard = lock_directory(other.path()).unwrap();
+        drop(guard);
+        let _restarted = lock_directory(dir.path()).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn lock_file_is_private_and_symlinks_are_refused() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let guard = lock_directory(dir.path()).unwrap();
+        assert_eq!(
+            guard.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(guard);
+        fs::remove_file(dir.path().join("instance.lock")).unwrap();
+        symlink("elsewhere", dir.path().join("instance.lock")).unwrap();
+        assert!(lock_directory(dir.path()).is_err());
     }
 }

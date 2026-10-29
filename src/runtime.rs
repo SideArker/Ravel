@@ -68,6 +68,7 @@ pub struct Worker {
     pub commands: mpsc::Sender<Command>,
     pub events: mpsc::Receiver<Event>,
     pub identity: Arc<Identity>,
+    _state_lock: std::fs::File,
     stop: watch::Sender<u64>,
     quit: watch::Sender<bool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -75,6 +76,7 @@ pub struct Worker {
 impl Worker {
     pub fn start(directory: PathBuf, name: String, port: u16) -> Result<Self> {
         validate_name(&name)?;
+        let state_lock = crate::identity::lock_directory(&directory)?;
         let identity = Arc::new(Identity::load_or_create(&directory)?);
         let store = Store::load(&directory)?;
         let (commands, rx) = mpsc::channel(32);
@@ -118,6 +120,7 @@ impl Worker {
             commands,
             events,
             identity,
+            _state_lock: state_lock,
             stop,
             quit,
             thread: Some(thread),

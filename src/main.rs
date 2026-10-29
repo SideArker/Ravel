@@ -10,6 +10,19 @@ use std::{path::PathBuf, time::Duration};
 fn main() {
     if let Err(error) = run() {
         eprintln!("Ravel: {error:#}");
+        #[cfg(windows)]
+        unsafe {
+            use windows::{
+                Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW},
+                core::{HSTRING, w},
+            };
+            MessageBoxW(
+                None,
+                &HSTRING::from(format!("{error:#}")),
+                w!("Ravel"),
+                MB_OK | MB_ICONERROR,
+            );
+        }
         std::process::exit(1);
     }
 }
