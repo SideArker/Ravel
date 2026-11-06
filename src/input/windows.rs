@@ -19,8 +19,10 @@ pub fn monitors() -> Result<Vec<Monitor>> {
     unsafe {
         let mut result = Vec::new();
         for index in 0.. {
-            let mut device = DISPLAY_DEVICEW::default();
-            device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+            let mut device = DISPLAY_DEVICEW {
+                cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+                ..Default::default()
+            };
             if EnumDisplayDevicesW(None, index, &mut device, Default::default()) == FALSE {
                 break;
             }
@@ -30,8 +32,10 @@ pub fn monitors() -> Result<Vec<Monitor>> {
             {
                 continue;
             }
-            let mut mode = DEVMODEW::default();
-            mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            let mut mode = DEVMODEW {
+                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+                ..Default::default()
+            };
             ensure!(
                 EnumDisplaySettingsW(
                     PCWSTR::from_raw(device.DeviceName.as_ptr()),
