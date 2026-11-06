@@ -44,8 +44,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\ravel-install.ps1
 
 The Windows installer adds Ravel to the current user's PATH; on Linux, the script
 prints a PATH hint when `~/.local/bin` is not already present. Releases are
-published from `v*` tags; until the first release is published, the installer has
-no binary to download. Binary installers currently support Linux x86_64 and
+published from `v*` tags. Binary installers currently support Linux x86_64 and
 Windows x64.
 
 The first scope is two devices with one active monitor each and private/link-local
