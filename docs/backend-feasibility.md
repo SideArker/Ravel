@@ -31,9 +31,10 @@ Linux/Windows scancode translation. This is dependency evidence, not native QA.
   elevated windows; secure desktops/UAC are unsupported. Native verification is
   still required.
 
-Single contiguous output per device is the first geometry scope. Mixed DPI is
-represented through logical display sizes. Multi-monitor gaps and rotation must
-not silently be treated as a supported display surface.
+The initial geometry scope used a single active output. Ravel now selects one
+handoff monitor while the OS manages movement among other local monitors. Mixed
+DPI is represented through logical display sizes. Multi-monitor gaps and rotation
+still require native validation.
 
 ## Required native evidence
 

@@ -63,6 +63,10 @@ impl EventThread {
         self.client_update(ClientUpdate::Destroy(pos));
     }
 
+    pub(crate) fn set_target(&self, bounds: [i32; 4]) {
+        self.client_update(ClientUpdate::Target(bounds));
+    }
+
     fn exit(&self) -> bool {
         self.signal(RequestType::Exit)
     }
@@ -108,6 +112,7 @@ enum RequestType {
 enum ClientUpdate {
     Create(Position),
     Destroy(Position),
+    Target([i32; 4]),
 }
 
 pub(super) static OVERFLOW: AtomicBool = AtomicBool::new(false);
@@ -140,6 +145,7 @@ thread_local! {
     static PREV_POS: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
     /// displays and generation counter
     static DISPLAYS: RefCell<(Vec<RECT>, i32)> = const { RefCell::new((Vec::new(), 0)) };
+    static TARGET: Cell<Option<[i32; 4]>> = const { Cell::new(None) };
 }
 
 fn get_msg() -> Option<MSG> {
@@ -304,6 +310,12 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
         return ret;
     };
 
+    if !TARGET.get().is_none_or(|[x, y, w, h]| {
+        prev_pos.0 >= x && prev_pos.0 < x + w && prev_pos.1 >= y && prev_pos.1 < y + h
+    }) {
+        return ret;
+    }
+
     /* check if a client is registered for the barrier */
     if !CLIENTS.with_borrow(|clients| clients.contains(&pos)) {
         return ret;
@@ -465,6 +477,7 @@ fn update_clients(request: ClientUpdate) {
             }
             CLIENTS.with_borrow_mut(|clients| clients.remove(&pos));
         }
+        ClientUpdate::Target(bounds) => TARGET.set(Some(bounds)),
     }
 }
 

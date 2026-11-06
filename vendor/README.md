@@ -6,10 +6,11 @@ https://github.com/feschber/lan-mouse at
 Original authors: Ferdinand Schober and lan-mouse contributors. The upstream
 license is in the root `LICENSE`. This application uses the same license.
 
-Only layer-shell and Windows capture are enabled. Local changes expose the edge
-entry coordinates and single-output logical bounds for proportional handoff,
-rename the layer surface, and use the pinned input-event dependency. X11 capture
-is implemented separately because upstream's X11 capture is a stub.
+Only layer-shell and Windows capture are enabled. Local changes expose output
+names and geometry, global edge entry coordinates, and selection of one output
+for handoff. The layer surface is renamed, and the pinned input-event dependency
+is used. X11 capture is implemented separately because upstream's X11 capture
+is a stub.
 
 The subset is one dependency import; subsequent local changes are reviewed as
 normal small commits. Do not enable excluded backends without importing their

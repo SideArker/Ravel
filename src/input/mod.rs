@@ -1,5 +1,5 @@
 use crate::{
-    geometry::{Display, Side},
+    geometry::{Display, Monitor, Side, monitor_bounds, selected_monitor},
     protocol::Input,
 };
 use anyhow::{Result, ensure};
@@ -17,6 +17,8 @@ mod x11;
 pub struct Backend {
     platform: Platform,
     pub display: Display,
+    pub desktop: Display,
+    pub monitors: Vec<Monitor>,
     pub label: &'static str,
     held: Held,
     armed: bool,
@@ -41,8 +43,40 @@ enum Platform {
         trace: std::rc::Rc<TestTrace>,
     },
 }
+#[cfg(target_os = "linux")]
+fn wayland_monitors(capture: &InputCapture) -> Result<Vec<Monitor>> {
+    let monitors: Vec<_> = capture
+        .outputs()
+        .into_iter()
+        .map(|(id, bounds)| {
+            Ok(Monitor {
+                id,
+                display: Display {
+                    x: bounds[0] as f64,
+                    y: bounds[1] as f64,
+                    width: bounds[2] as f64,
+                    height: bounds[3] as f64,
+                    scale: 1.,
+                }
+                .validate()?,
+            })
+        })
+        .collect::<Result<_>>()?;
+    ensure!(
+        !monitors.is_empty(),
+        "Wayland output geometry is unavailable"
+    );
+    ensure!(
+        monitors.iter().all(|m| !m.id.is_empty()),
+        "Wayland output names are unavailable"
+    );
+    Ok(monitors)
+}
 impl Backend {
     pub async fn new() -> Result<Self> {
+        Self::with_monitor(None).await
+    }
+    pub async fn with_monitor(selected: Option<&str>) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
             if std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -53,33 +87,35 @@ impl Backend {
                 // Dispatch output metadata without registering an edge or capturing input.
                 let _ = tokio::time::timeout(std::time::Duration::from_millis(150), capture.next())
                     .await;
-                let bounds = capture.bounds().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Wayland requires exactly one active output with logical geometry"
-                    )
-                })?;
-                let display = Display {
-                    x: bounds[0] as f64,
-                    y: bounds[1] as f64,
-                    width: bounds[2] as f64,
-                    height: bounds[3] as f64,
-                    scale: 1.,
-                }
-                .validate()?;
+                let monitors = wayland_monitors(&capture)?;
+                let display = selected_monitor(&monitors, selected)?;
+                let desktop = monitor_bounds(&monitors)?.validate()?;
+                capture.set_target([
+                    display.x as i32,
+                    display.y as i32,
+                    display.width as i32,
+                    display.height as i32,
+                ]);
                 let injector = wayland::Wayland::new()?;
                 return Ok(Self {
                     platform: Platform::Wayland { capture, injector },
                     display,
+                    desktop,
+                    monitors,
                     label: "Wayland: layer-shell + wlroots virtual input",
                     held: Held::default(),
                     armed: false,
                 });
             }
-            let backend = x11::X11::new()?;
+            let backend = x11::X11::new(selected)?;
             let display = backend.display();
+            let monitors = backend.monitors();
+            let desktop = monitor_bounds(&monitors)?.validate()?;
             Ok(Self {
                 platform: Platform::X11(backend),
                 display,
+                desktop,
+                monitors,
                 label: "Native X11: grabs + XTest",
                 held: Held::default(),
                 armed: false,
@@ -87,11 +123,21 @@ impl Backend {
         }
         #[cfg(windows)]
         {
-            let display = windows::display()?;
-            let capture = InputCapture::new(Some(input_capture::Backend::Windows)).await?;
+            let monitors = windows::monitors()?;
+            let display = selected_monitor(&monitors, selected)?;
+            let desktop = monitor_bounds(&monitors)?.validate()?;
+            let mut capture = InputCapture::new(Some(input_capture::Backend::Windows)).await?;
+            capture.set_target([
+                display.x as i32,
+                display.y as i32,
+                display.width as i32,
+                display.height as i32,
+            ]);
             Ok(Self {
                 platform: Platform::Windows(capture),
                 display,
+                desktop,
+                monitors,
                 label: "Windows: low-level hooks + SendInput",
                 held: Held::default(),
                 armed: false,
@@ -104,6 +150,13 @@ impl Backend {
         }
     }
     pub async fn arm(&mut self, side: Option<Side>) -> Result<()> {
+        if let Some(side) = side {
+            ensure!(
+                self.display
+                    .is_outer_edge(monitor_bounds(&self.monitors)?, side),
+                "Selected handoff monitor is not on the outer {side:?} edge"
+            );
+        }
         match &mut self.platform {
             #[cfg(target_os = "linux")]
             Platform::X11(x) => x.arm(side)?,
@@ -178,17 +231,14 @@ impl Backend {
             Platform::X11(x) => x.check_geometry()?,
             #[cfg(target_os = "linux")]
             Platform::Wayland { capture, .. } => {
-                let b = capture
-                    .bounds()
-                    .ok_or_else(|| anyhow::anyhow!("Output configuration changed"))?;
                 ensure!(
-                    self.display.width == b[2] as f64 && self.display.height == b[3] as f64,
-                    "Output size changed; reconnect sharing"
+                    wayland_monitors(capture)? == self.monitors,
+                    "Output configuration changed; reconnect sharing"
                 );
             }
             #[cfg(windows)]
             Platform::Windows(_) => ensure!(
-                windows::display()? == self.display,
+                windows::monitors()? == self.monitors,
                 "Display changed; reconnect sharing"
             ),
         }
@@ -215,7 +265,7 @@ impl Backend {
     fn inject_raw(&mut self, event: Input) -> Result<()> {
         match &mut self.platform {
             #[cfg(target_os = "linux")]
-            Platform::X11(x) => x.inject(event),
+            Platform::X11(x) => x.inject(event, self.desktop),
             #[cfg(target_os = "linux")]
             Platform::Wayland { injector, .. } => injector.inject(event),
             #[cfg(windows)]
@@ -361,6 +411,22 @@ impl Held {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn internal_monitor_edge_is_not_armed_for_remote_handoff() {
+        let (mut backend, _, _) = Backend::test();
+        backend.monitors.push(Monitor {
+            id: "right".into(),
+            display: Display {
+                x: 1000.,
+                y: 0.,
+                width: 1000.,
+                height: 800.,
+                scale: 1.,
+            },
+        });
+        assert!(backend.arm(Some(Side::Right)).await.is_err());
+        backend.arm(Some(Side::Left)).await.unwrap();
+    }
     #[test]
     fn releases_keys_and_buttons_and_detects_stop_chord() {
         let mut h = Held::default();
@@ -541,6 +607,23 @@ impl Backend {
                     height: 800.,
                     scale: 1.,
                 },
+                desktop: Display {
+                    x: 0.,
+                    y: 0.,
+                    width: 1000.,
+                    height: 800.,
+                    scale: 1.,
+                },
+                monitors: vec![Monitor {
+                    id: "test".into(),
+                    display: Display {
+                        x: 0.,
+                        y: 0.,
+                        width: 1000.,
+                        height: 800.,
+                        scale: 1.,
+                    },
+                }],
                 label: "Test input",
                 held: Held::default(),
                 armed: false,

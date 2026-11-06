@@ -62,7 +62,8 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin + 'static>(
         "Peer is not trusted"
     );
     ensure!(!signals.stop.has_changed()?, "Sharing was stopped");
-    let backend = Backend::new().await?;
+    let monitor = signals.store.borrow().monitor().map(str::to_owned);
+    let backend = Backend::with_monitor(monitor.as_deref()).await?;
     run_with_backend(stream, layout, initiator, signals, backend).await
 }
 
@@ -78,16 +79,19 @@ pub(crate) async fn run_with_backend<S: AsyncRead + AsyncWrite + Unpin + 'static
         ensure!(!signals.stop.has_changed()?, "Sharing was stopped");
         let exchange = async {
             backend.display.validate()?;
+            backend.desktop.validate()?;
             layout.validate()?;
-            protocol::write(&mut stream, &Message::Ready { display: backend.display, layout }).await?;
-            let Message::Ready { display: remote_display, layout: remote_layout } = protocol::read(&mut stream).await? else { bail!("Expected display configuration"); };
+            protocol::write(&mut stream, &Message::Ready { display: backend.display, desktop: backend.desktop, layout }).await?;
+            let Message::Ready { display: remote_display, desktop: remote_desktop, layout: remote_layout } = protocol::read(&mut stream).await? else { bail!("Expected display configuration"); };
             remote_display.validate()?;
+            remote_desktop.validate()?;
+            ensure!(remote_desktop.contains(remote_display), "Handoff monitor is outside the desktop");
             remote_layout.validate()?;
             let layout = if initiator { layout } else { remote_layout.reciprocal() };
             layout.validate()?;
-            Ok::<_, anyhow::Error>((remote_display, layout))
+            Ok::<_, anyhow::Error>((remote_display, remote_desktop, layout))
         };
-        let Some((remote_display, layout)) = (tokio::select! {
+        let Some((remote_display, remote_desktop, layout)) = (tokio::select! {
             biased;
             _ = signals.stop.changed() => None,
             result = tokio::time::timeout(Duration::from_secs(5), exchange) => Some(result.map_err(|_| anyhow!("Display exchange timed out"))??),
@@ -103,7 +107,7 @@ pub(crate) async fn run_with_backend<S: AsyncRead + AsyncWrite + Unpin + 'static
             "Connected — {}. Move to the {:?} edge to share.",
             backend.label, layout.side
         ));
-        control(stream, &mut backend, remote_display, layout, &mut signals).await
+        control(stream, &mut backend, remote_display, remote_desktop, layout, &mut signals).await
     }
     .await;
     let cleanup = backend.close().await;
@@ -128,7 +132,8 @@ fn send(tx: &mpsc::Sender<Message>, message: Message) -> Result<()> {
 async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
     stream: S,
     backend: &mut Backend,
-    remote: Display,
+    remote_monitor: Display,
+    remote_desktop: Display,
     layout: Layout,
     signals: &mut Signals,
 ) -> Result<()> {
@@ -195,8 +200,9 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                 match event {
                     CaptureEvent::Begin{point:entry}=>{
                         if direction!=Direction::Local || rearm_at.is_some(){backend.release_capture().await?;continue;}
+                        if !backend.display.on_edge(entry, layout.side) {backend.release_capture().await?;continue;}
                         if let Some(mapped)=layout.enter(backend.display.normalize(entry)) {
-                            point=mapped;direction=Direction::Sending;send(&outgoing,Message::Enter(point))?;
+                            point=remote_desktop.normalize(remote_monitor.denormalize(mapped));direction=Direction::Sending;send(&outgoing,Message::Enter(point))?;
                             let _=signals.status.try_send("Sending input — Ctrl+Alt+Shift+Esc stops sharing".into());
                         }else{backend.arm(None).await?;rearm_at=Some(Instant::now()+Duration::from_millis(350));}
                     },
@@ -204,10 +210,12 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                         if direction!=Direction::Sending {continue;}
                         if let Event::Pointer(PointerEvent::Motion{dx,dy,..})=event {
                             ensure!(dx.is_finite() && dy.is_finite() && dx.abs()<=32768. && dy.abs()<=32768.,"Invalid captured motion");
-                            point[0]+=dx/(remote.width-1.);point[1]+=dy/(remote.height-1.);
-                            if layout.returns(point) && let Some(p)=layout.return_point([point[0].clamp(0.,1.),point[1].clamp(0.,1.)]) {
+                            point[0]+=dx/(remote_desktop.width-1.);point[1]+=dy/(remote_desktop.height-1.);
+                            let remote_point=remote_monitor.normalize(remote_desktop.denormalize(point));
+                            if layout.returns(remote_point) && let Some(p)=layout.return_point([remote_point[0].clamp(0.,1.),remote_point[1].clamp(0.,1.)]) {
                                 send(&outgoing,Message::Leave)?;backend.arm(None).await?;
-                                backend.inject(Input::Motion{x:p[0],y:p[1]})?;held=Held::default();direction=Direction::Local;rearm_at=Some(Instant::now()+Duration::from_millis(350));
+                                let local=backend.desktop.normalize(backend.display.denormalize(p));
+                                backend.inject(Input::Motion{x:local[0],y:local[1]})?;held=Held::default();direction=Direction::Local;rearm_at=Some(Instant::now()+Duration::from_millis(350));
                             }else{
                                 point=[point[0].clamp(0.,1.),point[1].clamp(0.,1.)];send(&outgoing,Message::Input(Input::Motion{x:point[0],y:point[1]}))?;
                             }

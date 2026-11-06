@@ -11,6 +11,12 @@ pub struct Display {
     pub scale: f64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Monitor {
+    pub id: String,
+    pub display: Display,
+}
+
 impl Display {
     pub fn validate(self) -> Result<Self> {
         ensure!(
@@ -45,6 +51,75 @@ impl Display {
             self.y + point[1] * (self.height - 1.0),
         ]
     }
+
+    pub fn on_edge(self, point: [f64; 2], side: Side) -> bool {
+        let n = self.normalize(point);
+        let (edge, along) = match side {
+            Side::Left => (n[0], n[1]),
+            Side::Right => (1. - n[0], n[1]),
+            Side::Top => (n[1], n[0]),
+            Side::Bottom => (1. - n[1], n[0]),
+        };
+        edge.abs() <= 1. / (self.width.min(self.height) - 1.) && (0. ..=1.).contains(&along)
+    }
+    pub fn is_outer_edge(self, bounds: Display, side: Side) -> bool {
+        match side {
+            Side::Left => self.x == bounds.x,
+            Side::Right => self.x + self.width == bounds.x + bounds.width,
+            Side::Top => self.y == bounds.y,
+            Side::Bottom => self.y + self.height == bounds.y + bounds.height,
+        }
+    }
+    pub fn contains(self, other: Display) -> bool {
+        other.x >= self.x
+            && other.y >= self.y
+            && other.x + other.width <= self.x + self.width
+            && other.y + other.height <= self.y + self.height
+    }
+}
+
+pub fn selected_monitor(monitors: &[Monitor], id: Option<&str>) -> Result<Display> {
+    ensure!(!monitors.is_empty(), "No active monitors found");
+    let monitor = id
+        .map(|id| monitors.iter().find(|m| m.id == id))
+        .unwrap_or_else(|| monitors.first())
+        .ok_or_else(|| anyhow::anyhow!("Selected monitor is no longer active"))?;
+    monitor.display.validate()
+}
+
+pub fn monitor_bounds(monitors: &[Monitor]) -> Result<Display> {
+    ensure!(!monitors.is_empty(), "No active monitors found");
+    let left = monitors
+        .iter()
+        .map(|m| m.display.x)
+        .fold(f64::INFINITY, f64::min);
+    let top = monitors
+        .iter()
+        .map(|m| m.display.y)
+        .fold(f64::INFINITY, f64::min);
+    let right = monitors
+        .iter()
+        .map(|m| m.display.x + m.display.width)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let bottom = monitors
+        .iter()
+        .map(|m| m.display.y + m.display.height)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let bounds = Display {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+        scale: 1.,
+    };
+    ensure!(
+        bounds.width.is_finite()
+            && bounds.height.is_finite()
+            && bounds.width > 1.
+            && bounds.height > 1.,
+        "Invalid monitor layout"
+    );
+    Ok(bounds)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +196,55 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_handoff_monitor_uses_its_own_coordinates() {
+        let primary = Monitor {
+            id: "primary".into(),
+            display: Display {
+                x: 0.,
+                y: 0.,
+                width: 1000.,
+                height: 800.,
+                scale: 1.,
+            },
+        };
+        let right = Monitor {
+            id: "right".into(),
+            display: Display {
+                x: 1000.,
+                y: -100.,
+                width: 1200.,
+                height: 900.,
+                scale: 1.,
+            },
+        };
+        let monitors = [primary, right];
+        let selected = selected_monitor(&monitors, Some("right")).unwrap();
+        assert_eq!(selected.normalize([2199., 349.5]), [1., 0.5]);
+        assert!(selected.on_edge([2199., 349.5], Side::Right));
+        assert!(!selected.on_edge([999., 350.], Side::Right));
+        assert!(
+            !monitors[0]
+                .display
+                .is_outer_edge(monitor_bounds(&monitors).unwrap(), Side::Right)
+        );
+        assert!(selected.is_outer_edge(monitor_bounds(&monitors).unwrap(), Side::Right));
+        assert_eq!(selected.denormalize([0., 0.5]), [1000., 349.5]);
+        let desktop = monitor_bounds(&monitors).unwrap();
+        let mapped = desktop.denormalize(desktop.normalize(selected.denormalize([0., 0.5])));
+        assert!((mapped[0] - 1000.).abs() < 1e-8 && (mapped[1] - 349.5).abs() < 1e-8);
+        assert_eq!(
+            monitor_bounds(&monitors).unwrap(),
+            Display {
+                x: 0.,
+                y: -100.,
+                width: 2200.,
+                height: 900.,
+                scale: 1.
+            }
+        );
+        assert!(selected_monitor(&monitors, Some("removed")).is_err());
+    }
     #[test]
     fn negative_origin_and_scaling_use_logical_coordinates() {
         let d = Display {

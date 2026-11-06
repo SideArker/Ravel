@@ -1,6 +1,6 @@
 # Running and pairing Ravel
 
-Ravel currently implements one active output per device and one active control
+Ravel currently implements one selected handoff monitor per device and one active control
 connection. **This is a development build, not a certified two-laptop release.**
 See [verification](verification.md) for exactly what has been exercised.
 
@@ -8,31 +8,39 @@ See [verification](verification.md) for exactly what has been exercised.
 
 1. Run `ravel --name "Arch laptop"` and `ravel --name "Windows laptop"` on the
    same trusted LAN. The default TCP port is 4243; `--port` changes it.
-2. Choose **Check input backend** on each device. Fix any reported missing
-   protocol, display, or permission issue before allowing sharing.
-3. On one machine select **Show a five-minute PIN**. On the other select the
+2. Choose **Find monitors / check input** on each device. If there are multiple active
+   monitors, select the monitor whose outer edge should connect to the peer.
+   Fix any reported missing protocol, display, or permission issue before sharing.
+3. On one machine select **Show PIN on this device**. On the other select the
    discovered peer (or enter `192.168.x.y:4243`), enter that eight-digit PIN, and
    choose **Pair using PIN**.
 4. Compare the full peer fingerprint shown in each approval dialog against the
-   fingerprint displayed locally on the other screen. Approve on **both** devices
-   only when they match. A discovery name or fingerprint hint is not proof.
-5. Select the paired device and configure Left/Right/Top/Bottom and alignment.
-   Save, then **Allow sharing** on the receiving device and **Connect paired
-   device** on the initiating device. Connecting also allows sharing locally.
+   fingerprint under **Details & troubleshooting** on the other screen. Approve
+   on **both** devices only when they match. A discovery name or fingerprint hint
+   is not proof.
+5. Select the paired device and configure Left/Right/Top/Bottom under
+   **Handoff edge**. Adjust **Fine tune alignment** if needed and choose
+   **Save handoff edge**. Then choose **Allow incoming control** on the receiving
+   device and **Connect to device** on the initiating device. Connecting also
+   allows sharing locally.
 6. Move through the configured edge. Both devices can be the sender; local
    capture is disabled while receiving. Crossing back returns control.
 
 A positive alignment shifts the peer down along a vertical edge, or right along
 a horizontal edge. Values are fractions of the edge length, so 0.25 is 25%.
-Mapping is proportional between the devices' logical display sizes; nonoverlapping
+Handoff position is proportional between the selected monitors' logical sizes;
+subsequent motion spans the receiving device's desktop. Nonoverlapping
 edge segments do not transfer. The initiating device's saved layout determines
 that connection, and the receiver saves the reciprocal layout. Changes apply on
 reconnection. Mixed scales, rotation, and physical pointer speed require native
-calibration; they have not been certified. More than one active output is rejected.
+calibration; they have not been certified. The OS continues to handle movement
+between local monitors. Ravel captures only the selected monitor's handoff edge;
+the selected monitor must be at the outer edge in the chosen direction. A monitor
+change takes effect on the next connection.
 
 ## Stop and revoke
 
-**Stop / Disconnect** disables incoming control, closes sessions, cancels PINs,
+**Stop sharing** disables incoming control, closes sessions, cancels PINs,
 releases held keys/buttons, and cancels automatic reconnect. Closing the window
 also stops sharing. Ctrl+Alt+Shift+Esc stops while sending; Windows and native X11
 also poll the chord while receiving. Local `ravel --stop` is an independent path
@@ -58,7 +66,8 @@ bindsym Ctrl+Mod1+Shift+Escape exec /absolute/path/to/ravel --stop
 The in-capture chord remains available when shortcut inhibition is active. Verify
 both local stop paths before sharing passwords or using an unattended receiver.
 
-**Revoke / Unpair** removes the selected certificate fingerprint and stops all
+**Unpair selected device** under **Details & troubleshooting** removes the
+selected certificate fingerprint and stops all
 sharing. Revoking on one side prevents reconnection. Re-pair explicitly with a
 new PIN and approvals on both devices if needed. A different fingerprint never
 inherits trust from a matching name or address.
@@ -68,8 +77,8 @@ inherits trust from a matching name or address.
 | Session | Implemented path | Setup and boundary |
 | --- | --- | --- |
 | Hyprland / Sway-class Wayland | layer-shell capture; wlroots virtual keyboard/pointer | Needs layer-shell v3+, relative-pointer, pointer-constraints, xdg-output, shortcuts-inhibit, virtual-keyboard, virtual-pointer, seat v7+, local XKB keymap. Native constructor tested on Hyprland 0.56.2. Full physical input/handoff not yet certified. |
-| Native X11 | X11 grabs; XTest injection; RandR geometry | Requires XTest and RandR 1.5, a usable DISPLAY/Xauthority and one monitor. Tested in isolated Xvfb; a native desktop login is still needed. Xwayland is deliberately rejected. |
-| Windows | low-level hooks; SendInput | Cross-check compiles. Native Windows 11/MSVC validation remains required. Standard desktop only; elevated apps, UAC/secure desktops and multiple monitors are unsupported. Windows key repeat currently uses a fixed 500 ms delay/32 ms interval. |
+| Native X11 | X11 grabs; XTest injection; RandR geometry | Requires XTest and RandR 1.5 and a usable DISPLAY/Xauthority. Multi-monitor handoff requires native testing; isolated Xvfb covers one monitor. Xwayland is deliberately rejected. |
+| Windows | low-level hooks; SendInput | Multi-monitor handoff requires native Windows validation. Standard desktop only; elevated apps and UAC/secure desktops are unsupported. Windows key repeat currently uses a fixed 500 ms delay/32 ms interval. |
 | GNOME/KDE Wayland without the selected protocols | unavailable | No portal/libei adapter in this build. Reported backend failure; no Xwayland/dummy fallback. |
 
 No root/input group access is required by the chosen Linux backends. Wayland

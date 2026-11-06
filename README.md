@@ -20,9 +20,9 @@ cargo build --locked
 cargo run --locked -- --name "Arch laptop"
 ```
 
-Use **Check input backend**, pair with a PIN, compare and approve fingerprints on
+Use **Find monitors / check input**, pair with a PIN, compare and approve fingerprints on
 both screens, configure the peer's edge, then allow sharing and connect. The GUI
-has **Stop / Disconnect**; local `ravel --stop` also disables control. Wayland users
+has **Stop sharing**; local `ravel --stop` also disables control. Wayland users
 must configure the compositor stop binding described in the operation guide.
 
 ## Install a release
@@ -47,8 +47,9 @@ prints a PATH hint when `~/.local/bin` is not already present. Releases are
 published from `v*` tags. Binary installers currently support Linux x86_64 and
 Windows x64.
 
-The first scope is two devices with one active monitor each and private/link-local
-IPv4 networking. wlroots-compatible Wayland is implemented; GNOME/KDE portal-only
+The first scope is two devices with one selected handoff monitor each and private/link-local
+IPv4 networking. Other local monitors remain accessible after handoff.
+wlroots-compatible Wayland is implemented; GNOME/KDE portal-only
 sessions are unsupported. Windows and physical native X11/Wayland behavior still
 need two-device certification. No clipboard, files, mobile app, cloud services,
 installers or autostart are included.

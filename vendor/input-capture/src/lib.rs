@@ -196,6 +196,14 @@ impl InputCapture {
         self.capture.bounds()
     }
 
+    pub fn outputs(&self) -> Vec<(String, [i32; 4])> {
+        self.capture.outputs()
+    }
+
+    pub fn set_target(&mut self, bounds: [i32; 4]) {
+        self.capture.set_target(bounds);
+    }
+
     /// check whether the given keys are pressed
     pub fn keys_pressed(&self, keys: &[scancode::Linux]) -> bool {
         keys.iter().all(|k| self.pressed_keys.contains(k))
@@ -275,6 +283,10 @@ trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + U
     fn bounds(&self) -> Option<[i32; 4]> {
         None
     }
+    fn outputs(&self) -> Vec<(String, [i32; 4])> {
+        Vec::new()
+    }
+    fn set_target(&mut self, _bounds: [i32; 4]) {}
     /// create a new client with the given id
     async fn create(&mut self, pos: Position) -> Result<(), CaptureError>;
 

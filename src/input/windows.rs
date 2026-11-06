@@ -1,24 +1,70 @@
-use crate::{geometry::Display, protocol::Input};
+use crate::{
+    geometry::{Display, Monitor},
+    protocol::Input,
+};
 use anyhow::{Result, ensure};
-use windows::Win32::UI::{
-    Input::KeyboardAndMouse::*,
-    WindowsAndMessaging::{GetSystemMetrics, SM_CMONITORS, SM_CXSCREEN, SM_CYSCREEN},
+use windows::{
+    Win32::{
+        Foundation::FALSE,
+        Graphics::Gdi::{
+            DEVMODEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICE_PRIMARY_DEVICE,
+            DISPLAY_DEVICEW, ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW, EnumDisplaySettingsW,
+        },
+        UI::Input::KeyboardAndMouse::*,
+    },
+    core::PCWSTR,
 };
 
-pub fn display() -> Result<Display> {
+pub fn monitors() -> Result<Vec<Monitor>> {
     unsafe {
-        ensure!(
-            GetSystemMetrics(SM_CMONITORS) == 1,
-            "Exactly one active Windows monitor is required"
-        );
-        Display {
-            x: 0.,
-            y: 0.,
-            width: GetSystemMetrics(SM_CXSCREEN) as f64,
-            height: GetSystemMetrics(SM_CYSCREEN) as f64,
-            scale: 1.,
+        let mut result = Vec::new();
+        for index in 0.. {
+            let mut device = DISPLAY_DEVICEW::default();
+            device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+            if EnumDisplayDevicesW(None, index, &mut device, Default::default()) == FALSE {
+                break;
+            }
+            if !device
+                .StateFlags
+                .contains(DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)
+            {
+                continue;
+            }
+            let mut mode = DEVMODEW::default();
+            mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            ensure!(
+                EnumDisplaySettingsW(
+                    PCWSTR::from_raw(device.DeviceName.as_ptr()),
+                    ENUM_CURRENT_SETTINGS,
+                    &mut mode
+                ) != FALSE,
+                "Cannot read active Windows monitor geometry"
+            );
+            let pos = mode.Anonymous1.Anonymous2.dmPosition;
+            let name_len = device
+                .DeviceName
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(device.DeviceName.len());
+            let monitor = Monitor {
+                id: String::from_utf16_lossy(&device.DeviceName[..name_len]),
+                display: Display {
+                    x: pos.x as f64,
+                    y: pos.y as f64,
+                    width: mode.dmPelsWidth as f64,
+                    height: mode.dmPelsHeight as f64,
+                    scale: 1.,
+                }
+                .validate()?,
+            };
+            if device.StateFlags.contains(DISPLAY_DEVICE_PRIMARY_DEVICE) {
+                result.insert(0, monitor);
+            } else {
+                result.push(monitor);
+            }
         }
-        .validate()
+        ensure!(!result.is_empty(), "No active Windows monitors found");
+        Ok(result)
     }
 }
 pub fn inject(event: Input) -> Result<()> {
@@ -51,10 +97,10 @@ pub fn inject(event: Input) -> Result<()> {
             }
         }
         Input::Motion { x, y } => mouse(
-            (x * 65535.) as i32,
-            (y * 65535.) as i32,
+            (x * 65535.).round() as i32,
+            (y * 65535.).round() as i32,
             0,
-            MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
+            MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE,
         ),
         Input::Button { code, down } => {
             let (flag, data) = match (code, down) {

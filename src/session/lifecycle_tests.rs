@@ -13,6 +13,9 @@ struct Session {
 }
 impl Session {
     async fn start() -> Self {
+        Self::start_with_remote(None).await
+    }
+    async fn start_with_remote(remote: Option<(Display, Display)>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut store = Store::load(directory.path()).unwrap();
         let fp = "ab".repeat(32);
@@ -36,12 +39,25 @@ impl Session {
             signals,
             backend,
         ));
-        let Message::Ready { display, layout } = protocol::read(&mut peer).await.unwrap() else {
+        let Message::Ready {
+            display,
+            desktop,
+            layout,
+        } = protocol::read(&mut peer).await.unwrap()
+        else {
             panic!("Expected Ready");
         };
-        protocol::write(&mut peer, &Message::Ready { display, layout })
-            .await
-            .unwrap();
+        let (display, desktop) = remote.unwrap_or((display, desktop));
+        protocol::write(
+            &mut peer,
+            &Message::Ready {
+                display,
+                desktop,
+                layout,
+            },
+        )
+        .await
+        .unwrap();
         assert!(statuses.recv().await.unwrap().starts_with("Connected"));
         trace
             .wait_for(|state| state.armed == Some(Side::Right))
@@ -256,6 +272,105 @@ async fn captured_motion_and_keyboard_use_the_control_stream() {
             session.stop.send_modify(|epoch| *epoch += 1);
             session.task.await.unwrap().unwrap();
             assert!(session.trace.state.borrow().closed);
+        })
+        .await;
+}
+#[tokio::test]
+async fn only_the_selected_monitor_edge_enters_the_peer() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut session = Session::start().await;
+            session
+                .capture
+                .send(CaptureEvent::Begin {
+                    point: [1999., 100.],
+                })
+                .await
+                .unwrap();
+            session
+                .capture
+                .send(CaptureEvent::Begin {
+                    point: [999., 400.],
+                })
+                .await
+                .unwrap();
+            let Message::Enter(point) = protocol::read(&mut session.peer).await.unwrap() else {
+                panic!("Expected entry from selected monitor");
+            };
+            assert!((point[1] - 400. / 799.).abs() < 1e-8);
+            session.stop.send_modify(|epoch| *epoch += 1);
+            session.task.await.unwrap().unwrap();
+        })
+        .await;
+}
+#[tokio::test]
+async fn remote_motion_can_reach_another_local_monitor_and_return() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let monitor = Display {
+                x: 0.,
+                y: 0.,
+                width: 1000.,
+                height: 800.,
+                scale: 1.,
+            };
+            let desktop = Display {
+                width: 2000.,
+                ..monitor
+            };
+            let mut session = Session::start_with_remote(Some((monitor, desktop))).await;
+            session
+                .capture
+                .send(CaptureEvent::Begin {
+                    point: [999., 400.],
+                })
+                .await
+                .unwrap();
+            let entry = loop {
+                match protocol::read(&mut session.peer).await.unwrap() {
+                    Message::Enter(point) => break point,
+                    Message::Ping => {}
+                    _ => panic!("Expected entry"),
+                }
+            };
+            assert!(entry[0] < 0.01);
+            session
+                .capture
+                .send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
+                    time: 0,
+                    dx: 1200.,
+                    dy: 0.,
+                })))
+                .await
+                .unwrap();
+            loop {
+                match protocol::read(&mut session.peer).await.unwrap() {
+                    Message::Input(Input::Motion { x, .. }) => {
+                        assert!(x > 0.5);
+                        break;
+                    }
+                    Message::Ping => {}
+                    _ => panic!("Expected motion onto another monitor"),
+                }
+            }
+            session
+                .capture
+                .send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
+                    time: 0,
+                    dx: -2000.,
+                    dy: 0.,
+                })))
+                .await
+                .unwrap();
+            loop {
+                match protocol::read(&mut session.peer).await.unwrap() {
+                    Message::Leave => break,
+                    Message::Ping => {}
+                    _ => panic!("Expected return from the handoff monitor"),
+                }
+            }
+            session.stop.send_modify(|epoch| *epoch += 1);
+            session.task.await.unwrap().unwrap();
         })
         .await;
 }

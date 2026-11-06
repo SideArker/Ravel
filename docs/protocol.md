@@ -1,4 +1,4 @@
-# Protocol and threat model (version 1)
+# Protocol and threat model (version 2)
 
 Ravel is an IPv4 LAN application for two devices. Discovery is an untrusted hint.
 Names and addresses never authorize input. No backend, UDP input, plaintext
@@ -56,8 +56,10 @@ Length is checked before allocating. Protocol version must match exactly; no
 downgrade. Hello names: at most 64 printable characters. Finite pointer coordinates
 and scroll deltas are bounded; scancodes, buttons, states, and modifier masks are
 allowlisted. Unknown enums/fields and invalid transitions fail the connection.
-Only one control session is admitted. Both sides send display geometry before
-arming capture. Each input stream needs an Enter before Input and Leave before
+Only one control session is admitted. Both sides send the selected handoff
+monitor and full desktop geometry before arming capture. Motion coordinates use
+the full desktop; only the selected monitor's outer edge transfers control.
+Each input stream needs an Enter before Input and Leave before
 another Enter. Receiving disables capture to prevent echo. All keys, modifiers
 and mouse buttons are released on leave, error, stop, timeout and normal exit.
 

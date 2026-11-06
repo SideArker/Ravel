@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const MAX_FRAME: usize = 4096;
 
 #[derive(Serialize, Deserialize)]
@@ -22,6 +22,7 @@ pub enum Message {
     Approved,
     Ready {
         display: Display,
+        desktop: Display,
         layout: Layout,
     },
     Enter([f64; 2]),

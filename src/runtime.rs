@@ -1,6 +1,6 @@
 use crate::{
     discovery::{self, Discovery, Peer},
-    geometry::Layout,
+    geometry::{Layout, Monitor},
     identity::Identity,
     pairing::{self, Binding, Offer},
     protocol::{self, Message, VERSION},
@@ -30,6 +30,7 @@ pub enum Command {
     CancelPin,
     Enable,
     Probe,
+    Monitor(String),
     Pair {
         address: String,
         pin: Zeroizing<String>,
@@ -48,6 +49,8 @@ pub enum Command {
 pub enum Event {
     Status(String),
     Backend(String),
+    Monitors(Vec<Monitor>),
+    SelectedMonitor(Option<String>),
     Peers(Vec<Peer>),
     Trusted(BTreeMap<String, TrustedPeer>),
     Pin {
@@ -220,6 +223,9 @@ async fn work(
     let port = listener.local_addr()?.port();
     let server = tls::server(&ctx.identity)?;
     ctx.trusted_update();
+    let _ = ctx.events.try_send(Event::SelectedMonitor(
+        ctx.store.borrow().monitor().map(str::to_owned),
+    ));
     let _ = ctx.events.try_send(Event::Listening(port));
     ctx.status("Sharing stopped. Pair devices, then allow sharing on the receiving device.");
     let (discovery_tx, mut discovery_rx) = mpsc::channel(8);
@@ -258,7 +264,8 @@ async fn work(
                     Command::OfferPin=>{let offer=Offer::new(Instant::now());let _=ctx.events.try_send(Event::Pin{value:Zeroizing::new(offer.display_pin()),deadline:offer.deadline});*ctx.offer.borrow_mut()=Some(offer);Ok(())},
                     Command::CancelPin=>{ctx.offer.borrow_mut().take();let _=ctx.events.try_send(Event::PinClosed);Ok(())},
                     Command::Enable=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));ctx.status("Sharing allowed for trusted devices");Ok(())},
-                    Command::Probe=>{let events=ctx.events.clone();tasks.spawn_local(async move{let message=match crate::input::Backend::new().await{Ok(mut b)=>{let text=format!("{} — {:.0} × {:.0} logical units; constructor check only",b.label,b.display.width,b.display.height);match b.close().await{Ok(())=>text,Err(e)=>format!("Backend cleanup failed: {e}")}},Err(e)=>format!("Backend unavailable: {e:#}")};let _=events.try_send(Event::Backend(message));});Ok(())},
+                    Command::Probe=>{let events=ctx.events.clone();tasks.spawn_local(async move{let message=match crate::input::Backend::new().await{Ok(mut b)=>{let _=events.try_send(Event::Monitors(b.monitors.clone()));let text=format!("{} — {} active monitor(s); constructor check only",b.label,b.monitors.len());match b.close().await{Ok(())=>text,Err(e)=>format!("Backend cleanup failed: {e}")}},Err(e)=>format!("Backend unavailable: {e:#}")};let _=events.try_send(Event::Backend(message));});Ok(())},
+                    Command::Monitor(id)=>{let result=ctx.store.borrow_mut().set_monitor(id.clone());if result.is_ok(){let _=ctx.events.try_send(Event::SelectedMonitor(Some(id)));ctx.status("Handoff monitor saved for the next connection");}result},
                     Command::Pair{address,pin,expected}=>{let context=ctx.clone();let flag=outbound.clone();if flag.replace(true){Err(anyhow!("An outgoing connection is already in progress"))}else{tasks.spawn_local(async move{let result=outgoing(context.clone(),Target::new(address,expected),Some(pin)).await;flag.set(false);if let Err(e)=result{context.status(format!("Pairing failed: {e}"));}});Ok(())}},
                     Command::Connect{address,expected}=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));desired=Some(Target::new(address,expected));reconnect.reset_immediately();Ok(())},
                     Command::Revoke(fp)=>{ctx.stop.send_modify(|e|*e=e.wrapping_add(1));let result=ctx.store.borrow_mut().revoke(&fp);ctx.trusted_update();result},
@@ -537,10 +544,7 @@ async fn authorize(
     );
     ctx.store.borrow_mut().trust(fp.clone(), name)?;
     ctx.trusted_update();
-    ctx.status(format!(
-        "Paired with {}. Allow sharing on both devices, then connect.",
-        crate::identity::pretty_fingerprint(&fp)
-    ));
+    ctx.status("Device paired. Allow sharing on both devices, then connect.");
     Ok(None)
 }
 async fn control(

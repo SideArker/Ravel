@@ -1,6 +1,6 @@
 use super::CaptureEvent;
 use crate::{
-    geometry::{Display, Side},
+    geometry::{Display, Monitor, Side, selected_monitor},
     protocol::Input,
 };
 use anyhow::{Context, Result, ensure};
@@ -21,6 +21,7 @@ pub struct X11 {
     conn: RustConnection,
     root: u32,
     display: Display,
+    monitors: Vec<Monitor>,
     side: Option<Side>,
     active: bool,
     entry: [f64; 2],
@@ -28,7 +29,7 @@ pub struct X11 {
     scroll: [f64; 2],
 }
 impl X11 {
-    pub fn new() -> Result<Self> {
+    pub fn new(selected: Option<&str>) -> Result<Self> {
         ensure!(
             std::env::var_os("WAYLAND_DISPLAY").is_none(),
             "Xwayland is not native X11; use the Wayland backend"
@@ -38,11 +39,13 @@ impl X11 {
         conn.xtest_get_version(2, 2)?
             .reply()
             .context("XTest extension required")?;
-        let display = Self::geometry(&conn, root)?;
+        let monitors = Self::query_monitors(&conn, root)?;
+        let display = selected_monitor(&monitors, selected)?;
         Ok(Self {
             conn,
             root,
             display,
+            monitors,
             side: None,
             active: false,
             entry: [0.; 2],
@@ -50,28 +53,44 @@ impl X11 {
             scroll: [0.; 2],
         })
     }
-    fn geometry(conn: &RustConnection, root: u32) -> Result<Display> {
-        let monitors = conn
+    fn query_monitors(conn: &RustConnection, root: u32) -> Result<Vec<Monitor>> {
+        let info = conn
             .randr_get_monitors(root, true)?
             .reply()
             .context("RandR 1.5 required")?
             .monitors;
-        ensure!(
-            monitors.len() == 1,
-            "Exactly one active X11 monitor is required"
-        );
-        let m = &monitors[0];
-        Display {
-            x: m.x as f64,
-            y: m.y as f64,
-            width: m.width as f64,
-            height: m.height as f64,
-            scale: 1.,
+        let mut monitors = Vec::new();
+        for (index, m) in info.into_iter().enumerate() {
+            let name = if m.name == 0 {
+                format!("monitor-{index}")
+            } else {
+                String::from_utf8_lossy(&conn.get_atom_name(m.name)?.reply()?.name).into_owned()
+            };
+            let monitor = Monitor {
+                id: name,
+                display: Display {
+                    x: m.x as f64,
+                    y: m.y as f64,
+                    width: m.width as f64,
+                    height: m.height as f64,
+                    scale: 1.,
+                }
+                .validate()?,
+            };
+            if m.primary {
+                monitors.insert(0, monitor);
+            } else {
+                monitors.push(monitor);
+            }
         }
-        .validate()
+        ensure!(!monitors.is_empty(), "No active X11 monitors found");
+        Ok(monitors)
     }
     pub fn display(&self) -> Display {
         self.display
+    }
+    pub fn monitors(&self) -> Vec<Monitor> {
+        self.monitors.clone()
     }
     pub fn emergency_stop(&self) -> Result<bool> {
         let keys = self.conn.query_keymap()?.reply()?.keys;
@@ -86,7 +105,7 @@ impl X11 {
     }
     pub fn check_geometry(&self) -> Result<()> {
         ensure!(
-            Self::geometry(&self.conn, self.root)? == self.display,
+            Self::query_monitors(&self.conn, self.root)? == self.monitors,
             "Display changed; reconnect sharing"
         );
         Ok(())
@@ -126,13 +145,7 @@ impl X11 {
             };
             let p = self.conn.query_pointer(self.root)?.reply()?;
             let point = [p.root_x as f64, p.root_y as f64];
-            let n = self.display.normalize(point);
-            let at = match side {
-                Side::Left => n[0] <= 0.,
-                Side::Right => n[0] >= 1.,
-                Side::Top => n[1] <= 0.,
-                Side::Bottom => n[1] >= 1.,
-            };
+            let at = self.display.on_edge(point, side);
             if !at {
                 return Ok(None);
             }
@@ -249,9 +262,9 @@ impl X11 {
         self.conn.flush()?;
         Ok(())
     }
-    pub fn inject(&mut self, input: Input) -> Result<()> {
+    pub fn inject(&mut self, input: Input, desktop: Display) -> Result<()> {
         match input {
-            Input::Motion { x, y } => self.warp(self.display.denormalize([x, y]))?,
+            Input::Motion { x, y } => self.warp(desktop.denormalize([x, y]))?,
             Input::Key { code, down } => {
                 ensure!(code <= 247, "Scancode outside X11 range");
                 self.fake(

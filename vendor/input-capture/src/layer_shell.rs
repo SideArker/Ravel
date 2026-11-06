@@ -114,6 +114,7 @@ struct OutputInfo {
 
 struct State {
     active_positions: HashSet<Position>,
+    target: Option<[i32; 4]>,
     pointer: Option<WlPointer>,
     keyboard: Option<WlKeyboard>,
     pointer_lock: Option<ZwpLockedPointerV1>,
@@ -149,6 +150,7 @@ struct Window {
     layer_surface: ZwlrLayerSurfaceV1,
     pos: Position,
     size: (i32, i32),
+    origin: (i32, i32),
 }
 
 impl Window {
@@ -158,6 +160,7 @@ impl Window {
         output: &WlOutput,
         pos: Position,
         size: (i32, i32),
+        origin: (i32, i32),
     ) -> Window {
         log::debug!("creating window output: {output:?}, size: {size:?}");
         let g = &state.globals;
@@ -205,6 +208,7 @@ impl Window {
         surface.commit();
         Window {
             size,
+            origin,
             pos,
             buffer,
             surface,
@@ -250,6 +254,13 @@ fn get_output_configuration(state: &State, pos: Position) -> Vec<Output> {
     // as an opposite edge of a different output
     edges
         .iter()
+        .filter(|(output, _)| {
+            state.target.is_none_or(|bounds| {
+                output.info.as_ref().is_some_and(|info| {
+                    bounds == [info.position.0, info.position.1, info.size.0, info.size.1]
+                })
+            })
+        })
         .filter(|(_, edge)| !opposite_edges.iter().map(|(_, e)| *e).any(|e| &e == edge))
         .map(|(o, _)| o.clone())
         .collect()
@@ -309,6 +320,7 @@ impl LayerShellInputCapture {
 
         let mut state = State {
             active_positions: Default::default(),
+            target: None,
             pointer: None,
             keyboard: None,
             global_list,
@@ -522,7 +534,8 @@ impl State {
         );
         outputs.iter().for_each(|o| {
             if let Some(info) = o.info.as_ref() {
-                let window = Window::new(self, &self.qh, &o.wl_output, pos, info.size);
+                let window =
+                    Window::new(self, &self.qh, &o.wl_output, pos, info.size, info.position);
                 let window = Arc::new(window);
                 self.active_windows.push(window);
             }
@@ -607,6 +620,27 @@ impl Inner {
 
 #[async_trait]
 impl Capture for LayerShellInputCapture {
+    fn set_target(&mut self, bounds: [i32; 4]) {
+        self.0.get_mut().state.target = Some(bounds);
+        self.0.get_mut().state.update_windows();
+    }
+    fn outputs(&self) -> Vec<(String, [i32; 4])> {
+        self.0
+            .get_ref()
+            .state
+            .outputs
+            .iter()
+            .map(|output| {
+                output.info.as_ref().map(|info| {
+                    (
+                        info.name.clone(),
+                        [info.position.0, info.position.1, info.size.0, info.size.1],
+                    )
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default()
+    }
     fn bounds(&self) -> Option<[i32; 4]> {
         let outputs = &self.0.get_ref().state.outputs;
         if outputs.len() != 1 {
@@ -753,6 +787,10 @@ impl Dispatch<WlPointer, ()> for State {
                     Position::Top => [surface_x, 0.0],
                     Position::Bottom => [surface_x, (window.size.1 - 1) as f64],
                 };
+                let point = [
+                    point[0] + window.origin.0 as f64,
+                    point[1] + window.origin.1 as f64,
+                ];
                 app.pending_events
                     .push_back((pos, CaptureEvent::Begin { point }));
             }

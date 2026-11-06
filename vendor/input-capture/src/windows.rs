@@ -19,6 +19,9 @@ pub struct WindowsInputCapture {
 
 #[async_trait]
 impl Capture for WindowsInputCapture {
+    fn set_target(&mut self, bounds: [i32; 4]) {
+        self.event_thread.set_target(bounds);
+    }
     async fn create(&mut self, pos: Position) -> Result<(), CaptureError> {
         self.event_thread.create(pos);
         Ok(())

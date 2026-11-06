@@ -19,6 +19,8 @@ pub struct TrustedPeer {
 #[serde(deny_unknown_fields)]
 struct Data {
     peers: BTreeMap<String, TrustedPeer>,
+    #[serde(default)]
+    monitor: Option<String>,
 }
 pub struct Store {
     path: PathBuf,
@@ -33,6 +35,9 @@ impl Store {
             Data::default()
         };
         ensure!(data.peers.len() <= 32, "Too many trusted peers");
+        if let Some(id) = &data.monitor {
+            validate_monitor_id(id)?;
+        }
         for (fp, peer) in &data.peers {
             validate_fingerprint(fp)?;
             validate_name(&peer.name)?;
@@ -42,6 +47,15 @@ impl Store {
     }
     pub fn peers(&self) -> BTreeMap<String, TrustedPeer> {
         self.data.peers.clone()
+    }
+    pub fn monitor(&self) -> Option<&str> {
+        self.data.monitor.as_deref()
+    }
+    pub fn set_monitor(&mut self, id: String) -> Result<()> {
+        validate_monitor_id(&id)?;
+        let mut next = self.data.clone();
+        next.monitor = Some(id);
+        self.save(next)
     }
     pub fn trusted(&self, fp: &str) -> bool {
         self.data.peers.contains_key(fp)
@@ -91,6 +105,13 @@ impl Store {
         Ok(())
     }
 }
+fn validate_monitor_id(id: &str) -> Result<()> {
+    ensure!(
+        !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control),
+        "Invalid monitor identifier"
+    );
+    Ok(())
+}
 pub fn validate_fingerprint(fp: &str) -> Result<()> {
     ensure!(
         fp.len() == 64
@@ -123,8 +144,10 @@ mod tests {
             ..Layout::default()
         };
         s.set_layout(&fp, layout).unwrap();
+        s.set_monitor("DISPLAY2".into()).unwrap();
         let mut s = Store::load(dir.path()).unwrap();
         assert_eq!(s.layout(&fp), layout);
+        assert_eq!(s.monitor(), Some("DISPLAY2"));
         assert!(!s.trusted(&"cd".repeat(32)));
         s.revoke(&fp).unwrap();
         assert!(!Store::load(dir.path()).unwrap().trusted(&fp));

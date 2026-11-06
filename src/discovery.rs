@@ -60,7 +60,7 @@ impl Discovery {
             &hostname,
             "",
             port,
-            &[("name", name), ("fp", fp), ("version", "1")][..],
+            &[("name", name), ("fp", fp), ("version", "2")][..],
         )?
         .enable_addr_auto();
         let fullname = info.get_fullname().to_owned();
@@ -82,7 +82,7 @@ impl Discovery {
                         ServiceEvent::ServiceResolved(info)=>{
                             let name=info.get_property_val_str("name").unwrap_or("");
                             let fp=info.get_property_val_str("fp").unwrap_or("");
-                            if fp==own_fp || validate_name(name).is_err() || validate_fingerprint(fp).is_err() || info.get_property_val_str("version")!=Some("1") {continue;}
+                            if fp==own_fp || validate_name(name).is_err() || validate_fingerprint(fp).is_err() || info.get_property_val_str("version")!=Some("2") {continue;}
                             let addresses=info.get_addresses_v4().into_iter().map(|ip|SocketAddr::new(IpAddr::V4(ip),info.port)).filter(|addr|lan_ip(addr.ip()) && addr.port()!=0).take(8).collect::<Vec<_>>();
                             if addresses.is_empty() || (peers.len()>=64 && !peers.contains_key(&info.fullname)) {continue;}
                             peers.insert(info.fullname.clone(),Peer{service:info.fullname.clone(),name:name.into(),fingerprint:fp.into(),addresses});

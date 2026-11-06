@@ -81,8 +81,8 @@ fn run() -> Result<()> {
     let worker = Worker::start(directory, name.clone(), port)?;
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([800., 900.])
-            .with_min_inner_size([680., 650.]),
+            .with_inner_size([760., 680.])
+            .with_min_inner_size([640., 560.]),
         ..Default::default()
     };
     eframe::run_native(
