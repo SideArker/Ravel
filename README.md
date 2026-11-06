@@ -25,6 +25,10 @@ both screens, configure the peer's edge, then allow sharing and connect. The GUI
 has **Stop sharing**; local `ravel --stop` also disables control. Wayland users
 must configure the compositor stop binding described in the operation guide.
 
+Ravel checks GitHub releases when the window opens. If a newer release exists,
+it shows a dismissible prompt with a link to that release. You can check again
+under **Details & troubleshooting**. The app does not install updates automatically.
+
 ## Install a release
 
 Install the latest published x86_64 release without administrator privileges.

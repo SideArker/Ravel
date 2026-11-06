@@ -6,8 +6,10 @@ use crate::{
     store::TrustedPeer,
 };
 use eframe::egui::{self, Color32, RichText};
+use semver::Version;
 use std::{
     collections::BTreeMap,
+    sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
@@ -18,6 +20,12 @@ struct Confirmation {
     name: String,
     deadline: Instant,
     reply: oneshot::Sender<bool>,
+}
+enum UpdateState {
+    Checking(Receiver<Result<Option<Version>, String>>),
+    Available(Version),
+    Current,
+    Failed(String),
 }
 pub struct App {
     worker: Worker,
@@ -36,6 +44,8 @@ pub struct App {
     layout: Layout,
     offer: Option<(Zeroizing<String>, Instant)>,
     confirmations: Vec<Confirmation>,
+    updates: UpdateState,
+    show_update: bool,
     exit_at: Option<Instant>,
 }
 impl App {
@@ -57,8 +67,18 @@ impl App {
             layout: Layout::default(),
             offer: None,
             confirmations: vec![],
+            updates: Self::start_update_check(),
+            show_update: false,
             exit_at: smoke.then(|| Instant::now() + Duration::from_secs(3)),
         }
+    }
+    fn start_update_check() -> UpdateState {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = crate::updates::check().map_err(|error| format!("{error:#}"));
+            let _ = tx.send(result);
+        });
+        UpdateState::Checking(rx)
     }
     fn command(&mut self, command: Command) {
         if let Err(e) = self.worker.command(command) {
@@ -107,6 +127,24 @@ impl App {
         }
         self.confirmations
             .retain(|c| Instant::now() < c.deadline && !c.reply.is_closed());
+        let checked = match &self.updates {
+            UpdateState::Checking(rx) => match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Disconnected) => Some(Err("Update check stopped".into())),
+                Err(TryRecvError::Empty) => None,
+            },
+            _ => None,
+        };
+        if let Some(result) = checked {
+            self.updates = match result {
+                Ok(Some(version)) => {
+                    self.show_update = true;
+                    UpdateState::Available(version)
+                }
+                Ok(None) => UpdateState::Current,
+                Err(error) => UpdateState::Failed(error),
+            };
+        }
     }
     fn select(&mut self, fp: String, address: Option<String>) {
         self.layout = self.trusted.get(&fp).map(|p| p.layout).unwrap_or_default();
@@ -338,6 +376,22 @@ impl App {
 
     fn show_details(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Details & troubleshooting").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Check for updates").clicked() {
+                    self.updates = Self::start_update_check();
+                }
+                ui.label(format!("Installed v{}", env!("CARGO_PKG_VERSION")));
+            });
+            match &self.updates {
+                UpdateState::Checking(_) => { ui.small("Checking GitHub releases…"); }
+                UpdateState::Available(version) => {
+                    if ui.button(format!("Update v{version} available")).clicked() {
+                        self.show_update = true;
+                    }
+                }
+                UpdateState::Current => { ui.small("No newer release found."); }
+                UpdateState::Failed(error) => { ui.small(format!("Update check failed: {error}")); }
+            }
             ui.label(format!("This device: {} · TCP port {}", self.name, self.port));
             ui.label("This device's fingerprint:");
             ui.add(
@@ -383,7 +437,7 @@ impl eframe::App for App {
             ui.add_space(8.);
             ui.horizontal(|ui| {
                 ui.heading("Ravel");
-                ui.weak(format!("on {}", self.name));
+                ui.weak(format!("v{} · on {}", env!("CARGO_PKG_VERSION"), self.name));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add(
@@ -475,6 +529,38 @@ impl eframe::App for App {
             if let Some(answer) = answer {
                 let c = self.confirmations.remove(0);
                 let _ = c.reply.send(answer);
+            }
+        }
+        if self.show_update && self.confirmations.is_empty() {
+            if let UpdateState::Available(version) = &self.updates {
+                let version = version.clone();
+                let mut dismiss = false;
+                egui::Window::new("Ravel update available")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        ui.label(format!(
+                            "Ravel v{version} is available. You have v{}.",
+                            env!("CARGO_PKG_VERSION")
+                        ));
+                        ui.horizontal(|ui| {
+                            if ui.button("Open GitHub release").clicked() {
+                                ctx.open_url(egui::OpenUrl::new_tab(crate::updates::release_url(
+                                    &version,
+                                )));
+                                dismiss = true;
+                            }
+                            if ui.button("Later").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                    });
+                if dismiss {
+                    self.show_update = false;
+                }
+            } else {
+                self.show_update = false;
             }
         }
     }
