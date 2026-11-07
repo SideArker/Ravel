@@ -2,7 +2,9 @@ use crate::{
     geometry::{Display, Monitor, Side, monitor_bounds, selected_monitor},
     protocol::Input,
 };
-use anyhow::{Context, Result, ensure};
+#[cfg(target_os = "linux")]
+use anyhow::Context;
+use anyhow::{Result, ensure};
 use futures::StreamExt;
 pub use input_capture::CaptureEvent;
 use input_capture::InputCapture;
