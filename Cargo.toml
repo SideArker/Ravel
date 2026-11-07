@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2024"
 rust-version = "1.99"
 license = "GPL-3.0-or-later"
-description = "Paired LAN mouse and keyboard sharing for Windows and Linux"
+description = "Paired LAN mouse and keyboard sharing for Linux, Windows and macOS"
 
 [dependencies]
 anyhow = "1"
@@ -13,7 +13,7 @@ directories = "6"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 futures = "0.3"
 hex = "0.4"
-input-capture = { path = "vendor/input-capture", default-features = false, features = ["layer_shell"] }
+input-capture = { path = "vendor/input-capture", default-features = false, features = ["layer_shell", "libei"] }
 input-event = { git = "https://github.com/feschber/lan-mouse", rev = "69958c625163649b69e27d0a6fb5a3edd596a467" }
 mdns-sd = "0.17"
 pake-cpace = { git = "https://github.com/1Password/cpace", rev = "7e2e42c7d359969f4356292c2bd2cf3ff6eeeecc" }
@@ -31,6 +31,8 @@ ureq = { version = "3.4", default-features = false, features = ["rustls", "json"
 zeroize = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13.9", default-features = false, features = ["tokio", "input_capture", "remote_desktop", "screencast"] }
+reis = { version = "0.7", features = ["tokio"] }
 xkbcommon = "0.9"
 x11rb = { version = "0.13", features = ["xtest", "randr"] }
 wayland-client = "0.31"
@@ -40,6 +42,10 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25", features = ["highsierra"] }
+keycode = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

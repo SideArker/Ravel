@@ -31,9 +31,9 @@ See [verification](verification.md) for exactly what has been exercised.
    receiving. The indicator animates inside both Ravel windows when control moves.
 
 Both devices must run protocol version 3 after this update. The connection is
-OS-neutral: Linux↔Linux, Windows↔Windows and Linux↔Windows use the same pairing
+OS-neutral: Linux↔Linux, Windows↔Windows, macOS↔macOS and mixed-OS pairs use the same pairing
 and TLS session, subject to the local backend working on each endpoint. See the
-[compatibility plan](compatibility.md) for desktop coverage and macOS/GNOME/KDE work.
+[compatibility plan](compatibility.md) for desktop coverage and remaining native QA.
 
 Minimizing the window leaves the network worker and active sharing running.
 Closing the window stops sharing. Ravel does not currently have a tray icon or
@@ -56,7 +56,7 @@ change takes effect on the next connection.
 **Stop sharing** disables incoming control, closes sessions, cancels PINs,
 releases held keys/buttons, and cancels automatic reconnect. Closing the window
 also stops sharing. Ctrl+Alt+Shift+Esc stops while sending; Windows and native X11
-also poll the chord while receiving. Local `ravel --stop` is an independent path
+and macOS also poll the chord while receiving. Local `ravel --stop` is an independent path
 that the worker checks every 100 ms. Use the same `--state-dir` if one was supplied.
 Do not kill the process to stop normal sharing: OS-level abrupt termination cannot
 guarantee release delivery.
@@ -92,11 +92,11 @@ inherits trust from a matching name or address.
 | Hyprland / Sway-class Wayland | layer-shell capture; wlroots virtual keyboard/pointer | Needs layer-shell v3+, relative-pointer, pointer-constraints, xdg-output, shortcuts-inhibit, virtual-keyboard, virtual-pointer, seat v7+, local XKB keymap. Native constructor tested on Hyprland 0.56.2. Full physical input/handoff not yet certified. |
 | Native X11 | X11 grabs; XTest injection; RandR geometry | Requires XTest and RandR 1.5 and a usable DISPLAY/Xauthority. Multi-monitor handoff requires native testing; isolated Xvfb covers one monitor. Xwayland is deliberately rejected. |
 | Windows | low-level hooks; SendInput | Multi-monitor handoff requires native Windows validation. Standard desktop only; elevated apps and UAC/secure desktops are unsupported. Windows key repeat currently uses a fixed 500 ms delay/32 ms interval. |
-| GNOME/KDE Wayland without the selected protocols | unavailable | No portal/libei adapter in this build. Reported backend failure; no Xwayland/dummy fallback. |
+| GNOME/KDE Plasma Wayland | InputCapture portal edge barriers and libei capture; RemoteDesktop portal and EIS injection | Requires InputCapture keyboard/pointer capabilities and RemoteDesktop v2 with ConnectToEIS. The compositor asks for separate capture and injection permissions; denial is shown by **Check input backend**. Native GNOME and Plasma QA is pending. A portal barrier becomes active only when the compositor detects crossing. |
+| macOS | Core Graphics event tap and event posting | Requires Accessibility, Input Monitoring, and Input Control permissions. The constructor reports denied permissions; after granting them, relaunch Ravel. Native build, signing and physical input QA are pending. |
 
 No root/input group access is required by the chosen Linux backends. Wayland
-protocol availability is controlled by the compositor; there is no portal prompt
-or portal permission override in this implementation. A missing or refused
+protocol and portal availability is controlled by the compositor. A missing or refused
 backend is an error, not a supported zero-event backend. The GUI stays usable for
 pairing and diagnostics even when a backend is unavailable.
 

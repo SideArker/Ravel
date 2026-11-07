@@ -10,33 +10,35 @@ pair can. Protocol version 3 requires both devices to update together.
 | Hyprland/Sway and other wlroots-compatible Wayland compositors | Layer-shell edge capture and wlroots virtual input | Implemented; physical two-device validation pending. |
 | Native X11 | X11 grabs and XTest | Implemented; isolated Xvfb tested, physical desktop validation pending. |
 | Windows standard desktop | Low-level hooks and SendInput | Implemented; native two-device validation pending. Elevated and secure desktops are excluded. |
-| GNOME/KDE Plasma Wayland | None | Planned portal backend; currently reports missing protocols. |
-| macOS | None | Planned native backend; currently unsupported. |
+| GNOME/KDE Plasma Wayland | InputCapture and RemoteDesktop portals with libei/EIS | Code path added; GNOME and Plasma native validation pending. |
+| macOS | Core Graphics capture and injection | Code path added; native build, signing and real-Mac validation pending. |
 
 ## Backend boundaries
 
 Keep session ownership, TLS, pairing, geometry, and the wire input format shared.
 Select capture and injection APIs by capability, not by a hard-coded compositor
-name. The current `Backend` in `src/input/mod.rs` already separates native X11,
-wlroots Wayland, and Windows paths. Future portal capture and injection should
-be distinct variants because they have different permission and lifecycle rules.
+name. The `Backend` in `src/input/mod.rs` separates native X11, wlroots Wayland,
+Windows, portal capture/injection, and macOS paths. The portal variants have
+their own permission and lifecycle rules.
 Do not route an unsupported Wayland session through Xwayland or a dummy backend.
 
-For GNOME/KDE, implement the [InputCapture portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html)
+For GNOME/KDE, the [InputCapture portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html)
 for source edge barriers and libei events, then the
 [RemoteDesktop portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html)
-with ConnectToEIS for receiving input. Probe the portal versions and capabilities
-at runtime and show the compositor's permission result in the GUI. The portal
+with ConnectToEIS for receiving input are wired into separate capture and injection
+variants. Ravel probes portal versions and capabilities at runtime; the GUI shows
+permission failures returned by the compositor. The portal
 spec says the compositor alone activates capture at a barrier; a Ravel button
 cannot force immediate capture. Test permission denial, zone changes, keyboard
 layout, release, and reconnect on both GNOME and Plasma before calling either
 desktop supported.
 
-For macOS, add a native capture/injection variant using
+For macOS, a native capture/injection variant uses
 [Core Graphics event taps and posting](https://developer.apple.com/documentation/coregraphics/cgevent).
-Map macOS virtual key codes to Ravel's wire scancodes and back, and handle
-Accessibility/Input Monitoring permission denial without falling back to a
-zero-event backend. Build and package a signed app, then test edge capture,
+Mac virtual key codes map to Ravel's wire scancodes and back. Accessibility,
+Input Monitoring and Input Control denial returns an error instead of a
+zero-event backend. The package script requires a Developer ID signing identity;
+a signed build has not run. Test edge capture,
 modifiers, layouts, repeat, stop, sleep/wake, and release on real Macs.
 
 ## Release gates

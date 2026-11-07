@@ -6,15 +6,17 @@ https://github.com/feschber/lan-mouse at
 Original authors: Ferdinand Schober and lan-mouse contributors. The upstream
 license is in the root `LICENSE`. This application uses the same license.
 
-Only layer-shell and Windows capture are enabled. Local changes expose output
+Layer-shell, portal/libei, macOS and Windows capture are enabled. Local changes expose output
 names and geometry, global edge entry coordinates, and selection of one output
 for handoff. The layer surface is renamed, and the pinned input-event dependency
 is used. X11 capture is implemented separately because upstream's X11 capture
 is a stub.
 
-The subset is one dependency import; subsequent local changes are reviewed as
-normal small commits. Do not enable excluded backends without importing their
-sources and verifying their behavior. No dummy backend is selected by Ravel.
+The portal and macOS modules were imported from the same pinned upstream revision.
+The portal module now reports zones, respects the selected monitor, checks rejected
+barriers and handles version 2's Start flow. The macOS module reports the entry
+point and uses the selected monitor. Native QA is still required. No dummy
+backend is selected by Ravel.
 
 Further local hardening: require shortcut inhibition; reject capture queue
 congestion; ignore injected Windows events; remove key/cursor event logging;

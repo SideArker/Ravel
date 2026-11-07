@@ -27,6 +27,8 @@ use core_graphics::base::CGError;
 pub enum CaptureError {
     #[error("activation stream closed unexpectedly")]
     ActivationClosed,
+    #[error("compositor deactivated input capture")]
+    Deactivated,
     #[error("libei stream was closed")]
     EndOfStream,
     #[error("io error: `{0}`")]
@@ -100,6 +102,8 @@ impl CaptureCreationError {
 pub enum LibeiCaptureCreationError {
     #[error("xdg-desktop-portal: `{0}`")]
     Ashpd(#[from] ashpd::Error),
+    #[error("{0}")]
+    Unsupported(&'static str),
 }
 
 #[cfg(layer_shell)]

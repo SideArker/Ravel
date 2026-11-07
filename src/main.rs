@@ -69,7 +69,7 @@ fn run() -> Result<()> {
             .build()?;
         return runtime.block_on(async {
             let mut backend =
-                tokio::time::timeout(Duration::from_secs(3), ravel::input::Backend::new())
+                tokio::time::timeout(Duration::from_secs(120), ravel::input::Backend::new())
                     .await??;
             println!(
                 "{}: {} × {} logical units (constructor check; no input injected)",

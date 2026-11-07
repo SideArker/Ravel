@@ -4,7 +4,7 @@ jobs:
   check:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +22,9 @@ jobs:
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path install.ps1).Path, [ref]$tokens, [ref]$errors) > $null
           if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+      - name: Check macOS package script syntax
+        if: runner.os == 'macOS'
+        run: sh -n package/macos.sh
       - name: Linux libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxtst-dev libxkbcommon-dev libwayland-dev xvfb xauth

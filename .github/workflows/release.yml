@@ -44,8 +44,41 @@ jobs:
           name: ravel-windows-x86_64
           path: ravel-windows-x86_64.zip
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Import Developer ID certificate and package
+        shell: bash
+        env:
+          RAVEL_CERTIFICATE_P12_BASE64: ${{ secrets.RAVEL_CERTIFICATE_P12_BASE64 }}
+          RAVEL_CERTIFICATE_PASSWORD: ${{ secrets.RAVEL_CERTIFICATE_PASSWORD }}
+          RAVEL_CODESIGN_IDENTITY: ${{ secrets.RAVEL_CODESIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          : "${RAVEL_CERTIFICATE_P12_BASE64:?Missing macOS signing certificate}"
+          : "${RAVEL_CERTIFICATE_PASSWORD:?Missing macOS certificate password}"
+          : "${RAVEL_CODESIGN_IDENTITY:?Missing macOS signing identity}"
+          certificate="$RUNNER_TEMP/ravel-certificate.p12"
+          keychain="$RUNNER_TEMP/ravel-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          trap 'security delete-keychain "$keychain" >/dev/null 2>&1 || true; rm -f "$certificate"' EXIT
+          printf '%s' "$RAVEL_CERTIFICATE_P12_BASE64" | base64 -D > "$certificate"
+          security create-keychain -p "$password" "$keychain"
+          security default-keychain -s "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security import "$certificate" -k "$keychain" -P "$RAVEL_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          RAVEL_VERSION="${GITHUB_REF_NAME#v}" sh package/macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ravel-macos
+          path: dist/ravel-macos-*.zip
+
   publish:
-    needs: [linux, windows]
+    needs: [linux, windows, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

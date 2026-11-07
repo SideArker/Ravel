@@ -533,8 +533,8 @@ impl App {
             });
             ui.small("Nearby names and addresses are unverified until pairing is approved.");
             ui.small("Emergency stop: Ctrl+Alt+Shift+Esc while sending, or run ravel --stop locally.");
-            ui.small("Wayland requires wlroots protocols and a compositor stop binding. See docs/operation.md.");
-            ui.small("GNOME/KDE Wayland and macOS input backends are planned. See docs/compatibility.md.");
+            ui.small("Wayland needs either wlroots input protocols or working InputCapture and RemoteDesktop portals. Configure a compositor stop binding; see docs/operation.md.");
+            ui.small("Portal and macOS backends need native validation before release; see docs/compatibility.md.");
         });
     }
 }

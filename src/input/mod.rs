@@ -2,11 +2,15 @@ use crate::{
     geometry::{Display, Monitor, Side, monitor_bounds, selected_monitor},
     protocol::Input,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use futures::StreamExt;
 pub use input_capture::CaptureEvent;
 use input_capture::InputCapture;
 use std::collections::BTreeSet;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "linux")]
+mod portal;
 #[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(windows)]
@@ -22,7 +26,6 @@ pub struct Backend {
     pub label: &'static str,
     held: Held,
     armed: bool,
-    #[cfg(windows)]
     repeat: Option<(u32, std::time::Instant)>,
 }
 // A single backend lives for the session; boxing would add indirection to save a few hundred bytes.
@@ -34,9 +37,19 @@ enum Platform {
         injector: wayland::Wayland,
     },
     #[cfg(target_os = "linux")]
+    Portal {
+        capture: InputCapture,
+        injector: portal::Portal,
+    },
+    #[cfg(target_os = "linux")]
     X11(x11::X11),
     #[cfg(windows)]
     Windows(InputCapture),
+    #[cfg(target_os = "macos")]
+    MacOS {
+        capture: InputCapture,
+        injector: macos::Mac,
+    },
     #[cfg(test)]
     Test {
         events: tokio::sync::mpsc::Receiver<CaptureEvent>,
@@ -82,29 +95,78 @@ impl Backend {
             if std::env::var_os("WAYLAND_DISPLAY").is_some()
                 || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
             {
+                let wlroots = wayland::Wayland::new();
+                let mut capture = if wlroots.is_ok() {
+                    InputCapture::new(Some(input_capture::Backend::LayerShell))
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
+                if let (Some(mut capture), Ok(injector)) = (capture.take(), wlroots) {
+                    // Dispatch output metadata without registering an edge or capturing input.
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_millis(150), capture.next())
+                            .await;
+                    let monitors = wayland_monitors(&capture)?;
+                    let display = selected_monitor(&monitors, selected)?;
+                    let desktop = monitor_bounds(&monitors)?.validate()?;
+                    capture.set_target([
+                        display.x as i32,
+                        display.y as i32,
+                        display.width as i32,
+                        display.height as i32,
+                    ]);
+                    return Ok(Self {
+                        platform: Platform::Wayland { capture, injector },
+                        display,
+                        desktop,
+                        monitors,
+                        label: "Wayland: layer-shell + wlroots virtual input",
+                        held: Held::default(),
+                        armed: false,
+                        repeat: None,
+                    });
+                }
                 let mut capture =
-                    InputCapture::new(Some(input_capture::Backend::LayerShell)).await?;
-                // Dispatch output metadata without registering an edge or capturing input.
-                let _ = tokio::time::timeout(std::time::Duration::from_millis(150), capture.next())
-                    .await;
-                let monitors = wayland_monitors(&capture)?;
-                let display = selected_monitor(&monitors, selected)?;
-                let desktop = monitor_bounds(&monitors)?.validate()?;
+                    InputCapture::new(Some(input_capture::Backend::InputCapturePortal))
+                        .await
+                        .context("wlroots protocols unavailable and InputCapture portal failed")?;
+                let setup = (|| -> Result<_> {
+                    let monitors = wayland_monitors(&capture)?;
+                    let display = selected_monitor(&monitors, selected)?;
+                    let desktop = monitor_bounds(&monitors)?.validate()?;
+                    Ok((monitors, display, desktop))
+                })();
+                let (monitors, display, desktop) = match setup {
+                    Ok(value) => value,
+                    Err(error) => {
+                        capture.terminate().await?;
+                        return Err(error);
+                    }
+                };
                 capture.set_target([
                     display.x as i32,
                     display.y as i32,
                     display.width as i32,
                     display.height as i32,
                 ]);
-                let injector = wayland::Wayland::new()?;
+                let injector = match portal::Portal::new().await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        capture.terminate().await?;
+                        return Err(error);
+                    }
+                };
                 return Ok(Self {
-                    platform: Platform::Wayland { capture, injector },
+                    platform: Platform::Portal { capture, injector },
                     display,
                     desktop,
                     monitors,
-                    label: "Wayland: layer-shell + wlroots virtual input",
+                    label: "Wayland: InputCapture + RemoteDesktop portals",
                     held: Held::default(),
                     armed: false,
+                    repeat: None,
                 });
             }
             let backend = x11::X11::new(selected)?;
@@ -119,6 +181,7 @@ impl Backend {
                 label: "Native X11: grabs + XTest",
                 held: Held::default(),
                 armed: false,
+                repeat: None,
             })
         }
         #[cfg(windows)]
@@ -146,7 +209,33 @@ impl Backend {
         }
         #[cfg(target_os = "macos")]
         {
-            anyhow::bail!("macOS input backend is not implemented yet; see docs/compatibility.md")
+            let monitors = macos::monitors()?;
+            let display = selected_monitor(&monitors, selected)?;
+            let desktop = monitor_bounds(&monitors)?.validate()?;
+            let mut capture = InputCapture::new(Some(input_capture::Backend::MacOs)).await?;
+            capture.set_target([
+                display.x as i32,
+                display.y as i32,
+                display.width as i32,
+                display.height as i32,
+            ]);
+            let injector = match macos::Mac::new(desktop) {
+                Ok(value) => value,
+                Err(error) => {
+                    capture.terminate().await?;
+                    return Err(error);
+                }
+            };
+            Ok(Self {
+                platform: Platform::MacOS { capture, injector },
+                display,
+                desktop,
+                monitors,
+                label: "macOS: Core Graphics event tap + posting",
+                held: Held::default(),
+                armed: false,
+                repeat: None,
+            })
         }
         #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
@@ -166,8 +255,12 @@ impl Backend {
             Platform::X11(x) => x.arm(side)?,
             #[cfg(target_os = "linux")]
             Platform::Wayland { capture, .. } => arm_native(capture, &mut self.armed, side).await?,
+            #[cfg(target_os = "linux")]
+            Platform::Portal { capture, .. } => arm_native(capture, &mut self.armed, side).await?,
             #[cfg(windows)]
             Platform::Windows(capture) => arm_native(capture, &mut self.armed, side).await?,
+            #[cfg(target_os = "macos")]
+            Platform::MacOS { capture, .. } => arm_native(capture, &mut self.armed, side).await?,
             #[cfg(test)]
             Platform::Test { trace, .. } => {
                 trace.state.borrow_mut().armed = side;
@@ -182,8 +275,12 @@ impl Backend {
             Platform::X11(x) => x.next().await,
             #[cfg(target_os = "linux")]
             Platform::Wayland { capture, .. } => next_native(capture).await,
+            #[cfg(target_os = "linux")]
+            Platform::Portal { capture, .. } => next_native(capture).await,
             #[cfg(windows)]
             Platform::Windows(capture) => next_native(capture).await,
+            #[cfg(target_os = "macos")]
+            Platform::MacOS { capture, .. } => next_native(capture).await,
             #[cfg(test)]
             Platform::Test { events, .. } => events
                 .recv()
@@ -197,8 +294,12 @@ impl Backend {
             Platform::X11(x) => x.release()?,
             #[cfg(target_os = "linux")]
             Platform::Wayland { capture, .. } => capture.release().await?,
+            #[cfg(target_os = "linux")]
+            Platform::Portal { capture, .. } => capture.release().await?,
             #[cfg(windows)]
             Platform::Windows(capture) => capture.release().await?,
+            #[cfg(target_os = "macos")]
+            Platform::MacOS { capture, .. } => capture.release().await?,
             #[cfg(test)]
             Platform::Test { .. } => {}
         }
@@ -212,6 +313,20 @@ impl Backend {
             Platform::X11(x) => x.emergency_stop(),
             #[cfg(target_os = "linux")]
             Platform::Wayland { .. } => Ok(false),
+            #[cfg(target_os = "linux")]
+            Platform::Portal { injector, .. } => {
+                injector.maintenance()?;
+                if let Some((code, deadline)) = self.repeat
+                    && std::time::Instant::now() >= deadline
+                {
+                    injector.inject(Input::Key { code, down: true })?;
+                    self.repeat = Some((
+                        code,
+                        std::time::Instant::now() + std::time::Duration::from_millis(32),
+                    ));
+                }
+                Ok(false)
+            }
             #[cfg(windows)]
             Platform::Windows(_) => {
                 if let Some((code, deadline)) = self.repeat
@@ -224,6 +339,19 @@ impl Backend {
                     ));
                 }
                 Ok(windows::emergency_stop())
+            }
+            #[cfg(target_os = "macos")]
+            Platform::MacOS { injector, .. } => {
+                if let Some((code, deadline)) = self.repeat
+                    && std::time::Instant::now() >= deadline
+                {
+                    injector.inject(Input::Key { code, down: true })?;
+                    self.repeat = Some((
+                        code,
+                        std::time::Instant::now() + std::time::Duration::from_millis(32),
+                    ));
+                }
+                macos::Mac::maintenance()
             }
         }
     }
@@ -240,9 +368,19 @@ impl Backend {
                     "Output configuration changed; reconnect sharing"
                 );
             }
+            #[cfg(target_os = "linux")]
+            Platform::Portal { capture, .. } => ensure!(
+                wayland_monitors(capture)? == self.monitors,
+                "Portal zones changed; reconnect sharing"
+            ),
             #[cfg(windows)]
             Platform::Windows(_) => ensure!(
                 windows::monitors()? == self.monitors,
+                "Display changed; reconnect sharing"
+            ),
+            #[cfg(target_os = "macos")]
+            Platform::MacOS { .. } => ensure!(
+                macos::monitors()? == self.monitors,
                 "Display changed; reconnect sharing"
             ),
         }
@@ -255,7 +393,31 @@ impl Backend {
         }
         #[cfg(windows)]
         if let Input::Key { code, down } = event {
-            if down && ![29, 42, 54, 56, 97, 100, 125, 126, 58, 69, 70].contains(&code) {
+            if down && repeatable(code) {
+                self.repeat = Some((
+                    code,
+                    std::time::Instant::now() + std::time::Duration::from_millis(500),
+                ));
+            } else if !down && self.repeat.is_some_and(|(key, _)| key == code) {
+                self.repeat = None;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Input::Key { code, down } = event {
+            if down && repeatable(code) {
+                self.repeat = Some((
+                    code,
+                    std::time::Instant::now() + std::time::Duration::from_millis(500),
+                ));
+            } else if !down && self.repeat.is_some_and(|(key, _)| key == code) {
+                self.repeat = None;
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if matches!(self.platform, Platform::Portal { .. })
+            && let Input::Key { code, down } = event
+        {
+            if down && repeatable(code) {
                 self.repeat = Some((
                     code,
                     std::time::Instant::now() + std::time::Duration::from_millis(500),
@@ -272,8 +434,12 @@ impl Backend {
             Platform::X11(x) => x.inject(event, self.desktop),
             #[cfg(target_os = "linux")]
             Platform::Wayland { injector, .. } => injector.inject(event),
+            #[cfg(target_os = "linux")]
+            Platform::Portal { injector, .. } => injector.inject(event),
             #[cfg(windows)]
             Platform::Windows(_) => windows::inject(event),
+            #[cfg(target_os = "macos")]
+            Platform::MacOS { injector, .. } => injector.inject(event),
             #[cfg(test)]
             Platform::Test { trace, .. } => {
                 let mut state = trace.state.borrow_mut();
@@ -287,10 +453,7 @@ impl Backend {
         }
     }
     pub fn release_input(&mut self) -> Result<()> {
-        #[cfg(windows)]
-        {
-            self.repeat = None;
-        }
+        self.repeat = None;
         let events = self.held.releases();
         let mut first = None;
         // Try every release even when a device refuses one event.
@@ -310,8 +473,17 @@ impl Backend {
         match &mut self.platform {
             #[cfg(target_os = "linux")]
             Platform::Wayland { capture, .. } => capture.terminate().await?,
+            #[cfg(target_os = "linux")]
+            Platform::Portal { capture, injector } => {
+                let captured = capture.terminate().await;
+                let injected = injector.close().await;
+                captured?;
+                injected?;
+            }
             #[cfg(windows)]
             Platform::Windows(capture) => capture.terminate().await?,
+            #[cfg(target_os = "macos")]
+            Platform::MacOS { capture, .. } => capture.terminate().await?,
             #[cfg(test)]
             Platform::Test { trace, .. } => {
                 trace.state.borrow_mut().closed = true;
@@ -362,6 +534,10 @@ async fn next_native(capture: &mut InputCapture) -> Result<CaptureEvent> {
         .await
         .ok_or_else(|| anyhow::anyhow!("Input capture stream closed"))??;
     Ok(e)
+}
+
+fn repeatable(code: u32) -> bool {
+    ![29, 42, 54, 56, 97, 100, 125, 126, 58, 69, 70].contains(&code)
 }
 
 #[derive(Default)]
@@ -631,7 +807,6 @@ impl Backend {
                 label: "Test input",
                 held: Held::default(),
                 armed: false,
-                #[cfg(windows)]
                 repeat: None,
             },
             tx,

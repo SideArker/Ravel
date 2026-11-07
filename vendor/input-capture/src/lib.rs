@@ -17,6 +17,10 @@ pub mod error;
 
 #[cfg(layer_shell)]
 mod layer_shell;
+#[cfg(libei)]
+mod libei;
+#[cfg(target_os = "macos")]
+mod macos;
 
 #[cfg(windows)]
 mod windows;

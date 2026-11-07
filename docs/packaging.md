@@ -1,6 +1,6 @@
 # Build and package
 
-Tagged releases publish a Linux x86_64 tarball and Windows x64 ZIP, with user-level
+Tagged releases currently publish a Linux x86_64 tarball and Windows x64 ZIP, with user-level
 install scripts in `install.sh` and `install.ps1`. These install the binary only;
 there is no service, autostart integration or code signing. Do not distribute the
 state directory, identity keys, PINs, logs or `target` tree.
@@ -12,6 +12,31 @@ an existing copy there when the release binary differs, and needs
 Both scripts download the latest GitHub release. The Linux binary uses native GUI,
 X11 and libxkbcommon libraries; see the Arch package list below. The published
 binary targets are currently Linux x86_64 and Windows x64.
+
+## macOS candidate
+
+The macOS input code and a Developer ID packaging script are present, but no
+macOS release artifact has been produced or tested yet. The release workflow
+requires `RAVEL_CERTIFICATE_P12_BASE64`, `RAVEL_CERTIFICATE_PASSWORD` and
+`RAVEL_CODESIGN_IDENTITY` repository secrets; without them its macOS job and
+release publication fail.
+On a Mac with Xcode Command Line Tools, Rust 1.99 or newer, and a Developer ID
+Application certificate installed in the keychain:
+
+```sh
+export RAVEL_VERSION=0.3.0
+export RAVEL_CODESIGN_IDENTITY='Developer ID Application: Example (TEAMID)'
+sh package/macos.sh
+```
+
+The script builds the native release binary, creates `Ravel.app` with stable
+bundle identifier `com.sidearker.ravel`, signs it with the hardened runtime,
+verifies the signature, and writes an architecture-named ZIP in `dist/`. It requires
+real signing credentials; a cross-target `cargo check` cannot prove a macOS
+build, permissions or input behavior. Before publishing, run the app on real
+Apple Silicon Macs and complete the macOS scenarios in
+[compatibility](compatibility.md). Notarization and Gatekeeper installation
+behavior also need native release validation.
 
 ## Arch Linux
 

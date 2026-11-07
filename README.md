@@ -1,14 +1,15 @@
 # Ravel
 
 A native Rust desktop app for sharing a mouse and keyboard between two paired
-devices on a LAN. Both devices can run Linux, both can run Windows, or one can
-run each. **Development build: the full two-laptop release
+devices on a LAN. The protocol works across operating systems when both local
+input backends work. **Development build: the full two-laptop release
 acceptance checks are not yet complete.**
 
 Implemented: egui GUI, mDNS discovery/manual addressing, persistent certificate
 fingerprints and revocation, five-minute single-use CPace pairing with explicit
 fingerprint approvals, TLS 1.3 input sessions, edge layouts, disconnect cleanup,
-and native Windows, X11 and wlroots Wayland input paths.
+and native Windows, X11, wlroots Wayland, portal Wayland and macOS input paths.
+The portal and macOS paths have not passed native desktop validation yet.
 
 Rust 1.99+ is required (MSRV 1.99). On Arch:
 
@@ -62,10 +63,11 @@ Windows x64.
 
 The first scope is two devices with one selected handoff monitor each and private/link-local
 IPv4 networking. Other local monitors remain accessible after handoff.
-wlroots-compatible Wayland is implemented; GNOME/KDE portal-only
-sessions and macOS are not supported yet. Windows and physical native X11/Wayland behavior still
-need two-device certification. No clipboard, files, mobile app, cloud services,
-macOS package or autostart are included.
+wlroots-compatible Wayland and native X11 have local constructor or isolated
+test evidence. The new GNOME/KDE portal and macOS paths require native tests,
+and macOS release packaging requires a Developer ID signing identity. All
+backends still need two-device certification. No clipboard, files, mobile app,
+cloud services or autostart are included.
 
 - [Pairing, backends, stop bindings and firewall setup](docs/operation.md)
 - [Protocol, limits and threat model](docs/protocol.md)
