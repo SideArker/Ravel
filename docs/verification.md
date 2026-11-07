@@ -1,5 +1,30 @@
 # Implementation evidence and release gates
 
+## 2026-11-07 follow-up (v0.3.0 development build)
+
+Protocol version 3 adds authenticated ReturnControl and requires both peers to
+update. Discovery now advertises and filters using the protocol constant. The
+GUI labels the active controller and offers **Take control on this device** when
+receiving. A 48-unit outward push guards edge transfer, with progress feedback
+and a short animation inside each Ravel window. The earlier keyboard path now
+has a press-and-release transport test. These are session-loop and GUI changes;
+no desktop-wide overlay or new platform input backend was added.
+
+Current ordinary tests: 44 passed, 3 ignored (LAN multicast, isolated X11, and
+GitHub network). The LAN multicast opt-in test passed separately. `cargo fmt`
+and Clippy passed. The isolated X11 check could not run on this host because
+Xvfb and `xvfb-run` are absent; physical two-device input remains untested.
+
+The reported Quickshell “Ravel isn't responding” notification was not reproduced
+by switching from the Ravel workspace for 12 seconds while monitoring desktop
+notifications. The live process had a polling GUI thread and no matching
+Hyprland log entry. Its Wayland app ID is now set to `ravel` so shells can
+identify the window, but this is not evidence that the warning is fixed.
+
+See [compatibility](compatibility.md) for the GNOME/KDE portal and macOS backend
+plan. All results below are the earlier historical baseline and retain their
+original dates and counts.
+
 Status on 2026-10-29: **development implementation; first usable release acceptance
 is incomplete.** The code and build path exist. Native Windows and two physical
 laptops were not available, so input interoperability cannot be certified here.
