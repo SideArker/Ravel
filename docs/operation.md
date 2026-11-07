@@ -93,7 +93,7 @@ inherits trust from a matching name or address.
 | Native X11 | X11 grabs; XTest injection; RandR geometry | Requires XTest and RandR 1.5 and a usable DISPLAY/Xauthority. Multi-monitor handoff requires native testing; isolated Xvfb covers one monitor. Xwayland is deliberately rejected. |
 | Windows | low-level hooks; SendInput | Multi-monitor handoff requires native Windows validation. Standard desktop only; elevated apps and UAC/secure desktops are unsupported. Windows key repeat currently uses a fixed 500 ms delay/32 ms interval. |
 | GNOME/KDE Plasma Wayland | InputCapture portal edge barriers and libei capture; RemoteDesktop portal and EIS injection | Requires InputCapture keyboard/pointer capabilities and RemoteDesktop v2 with ConnectToEIS. The compositor asks for separate capture and injection permissions; denial is shown by **Check input backend**. Native GNOME and Plasma QA is pending. A portal barrier becomes active only when the compositor detects crossing. |
-| macOS | Core Graphics event tap and event posting | Requires Accessibility, Input Monitoring, and Input Control permissions. The constructor reports denied permissions; after granting them, relaunch Ravel. Native build, signing and physical input QA are pending. |
+| macOS | Core Graphics event tap and event posting | Requires Accessibility, Input Monitoring, and Input Control permissions. The constructor reports denied permissions; after granting them, relaunch Ravel. Native CI build and tests passed; signing and physical input QA are pending. |
 
 No root/input group access is required by the chosen Linux backends. Wayland
 protocol and portal availability is controlled by the compositor. A missing or refused

@@ -11,7 +11,7 @@ pair can. Protocol version 3 requires both devices to update together.
 | Native X11 | X11 grabs and XTest | Implemented; isolated Xvfb tested, physical desktop validation pending. |
 | Windows standard desktop | Low-level hooks and SendInput | Implemented; native two-device validation pending. Elevated and secure desktops are excluded. |
 | GNOME/KDE Plasma Wayland | InputCapture and RemoteDesktop portals with libei/EIS | Code path added; GNOME and Plasma native validation pending. |
-| macOS | Core Graphics capture and injection | Code path added; native build, signing and real-Mac validation pending. |
+| macOS | Core Graphics capture and injection | Native CI build and tests passed; signing and real-Mac input validation pending. |
 
 ## Backend boundaries
 

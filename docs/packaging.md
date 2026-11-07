@@ -15,8 +15,9 @@ binary targets are currently Linux x86_64 and Windows x64.
 
 ## macOS candidate
 
-The macOS input code and a Developer ID packaging script are present, but no
-macOS release artifact has been produced or tested yet. The release workflow
+The macOS input code and a Developer ID packaging script are present. An
+unsigned native release build passed CI, but no signed macOS release artifact
+has been produced or tested. The release workflow
 requires `RAVEL_CERTIFICATE_P12_BASE64`, `RAVEL_CERTIFICATE_PASSWORD` and
 `RAVEL_CODESIGN_IDENTITY` repository secrets; without them its macOS job and
 release publication fail.

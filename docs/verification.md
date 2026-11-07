@@ -9,8 +9,8 @@ the selected monitor, handles version 1 and 2 session starts, checks granted
 capabilities and rejected barriers, reports activation coordinates, and
 invalidates geometry on zone changes. Capture errors and EIS disconnects now
 reach the session loop, including failures before the barrier is enabled. The
-EIS injector checks granted keyboard
-and pointer control, waits for active devices, sends motion, keys, buttons and
+EIS injector checks granted keyboard and pointer control, waits for active
+devices, sends motion, keys, buttons and
 scroll, and fails on device loss. Permission failures reach the GUI backend
 status. This code compiles on Linux. It has not been exercised on GNOME or
 Plasma, so portal behavior is a candidate pending native QA.
@@ -20,18 +20,18 @@ geometry and event errors surfaced to the session. The new Core Graphics
 injector maps evdev wire keys to virtual key codes, posts mouse and keyboard
 events, and checks Accessibility and requests Input Control; capture requests
 Input Monitoring when it is absent. The capture dependency and injector each
-type-checked for
-`aarch64-apple-darwin` in isolation. A full Ravel cross-check stopped in the
-`ring` build because this Linux host has no macOS SDK (`TargetConditionals.h`).
-No native Mac build, signed app or input test has run. The package script and
-release job are prepared for Developer ID credentials, and publishing waits
+type-checked for `aarch64-apple-darwin` in isolation. A full Ravel cross-check
+stopped in the `ring` build because this Linux host has no macOS SDK
+(`TargetConditionals.h`). Native macOS CI later passed Clippy, tests, and a
+release build. No signed app or physical input test has run. The package script
+and release job are prepared for Developer ID credentials, and publishing waits
 for the signed macOS artifact.
 
 | Release gate | Evidence and remaining work |
 | --- | --- |
-| Platform-neutral protocol/session behavior | Existing ReturnControl, handoff, mutual TLS transport and held-input cleanup tests passed on Linux. They use test input adapters, so platform APIs are not covered. |
-| GNOME and Plasma portal backend | Linux compilation and source review only. Run permission denial, zones, layout, release, repeat and reconnect on both desktops in both sender and receiver roles. |
-| macOS backend and signed app | Capture and injector type checks in isolation only. Build/package/sign on a real Mac; run permission, key mapping, edge, repeat, sleep/wake and cleanup tests. |
+| Platform-neutral protocol/session behavior | Existing ReturnControl, handoff, mutual TLS transport and held-input cleanup tests passed on Linux, Windows, and macOS CI. They use test input adapters, so platform APIs are not covered. |
+| GNOME and Plasma portal backend | Linux compilation and CI tests only. Run permission denial, zones, layout, release, repeat and reconnect on both desktops in both sender and receiver roles. |
+| macOS backend and signed app | Native macOS CI built the release binary and passed tests. Package/sign on a Mac with Developer ID credentials; run permission, key mapping, edge, repeat, sleep/wake and cleanup tests. |
 | Two-machine interoperability | No physical pair was available. Test each backend in both directions, same-OS and mixed-OS pairs, and record compositor and OS versions before release. |
 
 Checks on the final Linux tree: `cargo fmt --all -- --check`,
@@ -45,7 +45,11 @@ capture module and a separate type check of the injector passed; the core
 evdev↔macOS key mapping round trip passed in a host-side check. A full
 `aarch64-apple-darwin` Ravel check stopped in `ring` because the host lacks the
 macOS SDK header `TargetConditionals.h`. A Windows GNU cross-check stopped in
-`ring` because `x86_64-w64-mingw32-gcc` is absent. Native CI has not run here.
+`ring` because `x86_64-w64-mingw32-gcc` is absent. The
+[native CI run](https://github.com/SideArker/Ravel/actions/runs/42402366789)
+passed Linux, Windows, and macOS formatting, Clippy, tests, and release builds.
+Its Linux job also passed the isolated Xvfb input lifecycle check. CI did not
+exercise portal permissions, macOS event taps, signing, or two-machine input.
 
 The animated handoff remains inside the Ravel window. A desktop-wide overlay
 is outside this implementation. Windows elevated and secure desktops remain
