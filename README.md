@@ -32,12 +32,15 @@ under **Details & troubleshooting**. The app does not install updates automatica
 ## Install a release
 
 Install the latest published x86_64 release without administrator privileges.
-Linux needs `curl`, `tar`, and the runtime libraries described in
+Linux needs `curl`, `tar`, `cmp`, and the runtime libraries described in
 [packaging](docs/packaging.md). In a terminal:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Sidearker/Ravel/main/install.sh | sh
 ```
+
+Run the same command again to upgrade a Ravel copy installed by this script.
+It replaces a different binary in the install directory and skips an identical one.
 
 On Windows, run these commands in PowerShell:
 

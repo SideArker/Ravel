@@ -5,8 +5,9 @@ install scripts in `install.sh` and `install.ps1`. These install the binary only
 there is no service, autostart integration or code signing. Do not distribute the
 state directory, identity keys, PINs, logs or `target` tree.
 
-The Linux script installs to `~/.local/bin` (or `RAVEL_INSTALL_DIR`) and needs
-`curl`, `tar`, and `install`. The Windows script installs to
+The Linux script installs to `~/.local/bin` (or `RAVEL_INSTALL_DIR`), upgrades
+an existing copy there when the release binary differs, and needs
+`curl`, `tar`, `cmp`, and `install`. The Windows script installs to
 `%LOCALAPPDATA%\Programs\Ravel` and adds that directory to the current user's PATH.
 Both scripts download the latest GitHub release. The Linux binary uses native GUI,
 X11 and libxkbcommon libraries; see the Arch package list below. The published

@@ -11,9 +11,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Check Linux installer syntax
+      - name: Check Linux installer
         if: runner.os == 'Linux'
-        run: sh -n install.sh
+        run: sh -n install.sh && sh tests/install.sh
       - name: Check Windows installer syntax
         if: runner.os == 'Windows'
         shell: pwsh
