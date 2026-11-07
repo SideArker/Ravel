@@ -53,13 +53,16 @@ case "$output" in *"Updated Ravel at $tmpdir/install/ravel"*) ;; *) exit 1 ;; es
 output=$(run_installer)
 case "$output" in *"already up to date"*) ;; *) exit 1 ;; esac
 
-cp "$(command -v sleep)" "$tmpdir/install/ravel"
-"$tmpdir/install/ravel" 30 &
+printf '#!/bin/sh\nexec sleep 30\n' > "$tmpdir/install/ravel"
+chmod +x "$tmpdir/install/ravel"
+"$tmpdir/install/ravel" &
 running=$!
 sleep 0.1
+kill -0 "$running"
 output=$(run_installer)
 case "$output" in *"Updated Ravel at $tmpdir/install/ravel"*) ;; *) exit 1 ;; esac
 [ "$("$tmpdir/install/ravel")" = 'new release' ]
+kill -0 "$running"
 kill "$running"
 wait "$running" 2>/dev/null || :
 running=''
