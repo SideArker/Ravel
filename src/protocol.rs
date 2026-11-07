@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const MAX_FRAME: usize = 4096;
 
 #[derive(Serialize, Deserialize)]
@@ -28,6 +28,7 @@ pub enum Message {
     Enter([f64; 2]),
     Input(Input),
     Leave,
+    ReturnControl,
     Ping,
     Stop,
 }

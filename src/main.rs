@@ -81,6 +81,7 @@ fn run() -> Result<()> {
     let worker = Worker::start(directory, name.clone(), port)?;
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_app_id("ravel")
             .with_inner_size([760., 680.])
             .with_min_inner_size([640., 560.]),
         ..Default::default()

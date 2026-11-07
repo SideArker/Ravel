@@ -8,10 +8,22 @@ struct Session {
     capture: mpsc::Sender<CaptureEvent>,
     trace: Rc<TestTrace>,
     stop: watch::Sender<u64>,
+    take_control: watch::Sender<u64>,
+    feedback: mpsc::Receiver<Feedback>,
     store: Rc<RefCell<Store>>,
     _directory: tempfile::TempDir,
 }
 impl Session {
+    async fn push_through(&self) {
+        self.capture
+            .send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
+                time: 0,
+                dx: 50.,
+                dy: 0.,
+            })))
+            .await
+            .unwrap();
+    }
     async fn start() -> Self {
         Self::start_with_remote(None).await
     }
@@ -21,7 +33,9 @@ impl Session {
         let fp = "ab".repeat(32);
         store.trust(fp.clone(), "Test peer".into()).unwrap();
         let (stop, receiver) = watch::channel(0);
+        let (take_control, control_rx) = watch::channel(0);
         let (status, mut statuses) = mpsc::channel(16);
+        let (feedback_tx, feedback) = mpsc::channel(32);
         let (backend, capture, trace) = Backend::test();
         let (local, mut peer) = tokio::io::duplex(65536);
         let store = Rc::new(RefCell::new(store));
@@ -31,6 +45,8 @@ impl Session {
             store: store.clone(),
             fingerprint: fp,
             status,
+            feedback: feedback_tx,
+            take_control: control_rx,
         };
         let task = tokio::task::spawn_local(run_with_backend(
             local,
@@ -68,6 +84,8 @@ impl Session {
             capture,
             trace,
             stop,
+            take_control,
+            feedback,
             store,
             _directory: directory,
         }
@@ -232,6 +250,7 @@ async fn captured_motion_and_keyboard_use_the_control_stream() {
                 })
                 .await
                 .unwrap();
+            session.push_through().await;
             let mut inputs = 0;
             session
                 .capture
@@ -251,7 +270,16 @@ async fn captured_motion_and_keyboard_use_the_control_stream() {
                 })))
                 .await
                 .unwrap();
-            while inputs < 3 {
+            session
+                .capture
+                .send(CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key {
+                    time: 1,
+                    key: 30,
+                    state: 0,
+                })))
+                .await
+                .unwrap();
+            while inputs < 4 {
                 match protocol::read(&mut session.peer).await.unwrap() {
                     Message::Enter(point) => {
                         assert!(point_valid(point));
@@ -260,6 +288,10 @@ async fn captured_motion_and_keyboard_use_the_control_stream() {
                     Message::Input(Input::Key {
                         code: 30,
                         down: true,
+                    }) => inputs += 1,
+                    Message::Input(Input::Key {
+                        code: 30,
+                        down: false,
                     }) => inputs += 1,
                     Message::Input(Input::Motion { x, y }) => {
                         assert!(point_valid([x, y]));
@@ -272,6 +304,117 @@ async fn captured_motion_and_keyboard_use_the_control_stream() {
             session.stop.send_modify(|epoch| *epoch += 1);
             session.task.await.unwrap().unwrap();
             assert!(session.trace.state.borrow().closed);
+        })
+        .await;
+}
+#[tokio::test]
+async fn local_button_requests_control_return_from_peer() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut session = Session::start().await;
+            protocol::write(&mut session.peer, &Message::Enter([0.2, 0.5]))
+                .await
+                .unwrap();
+            while session.feedback.recv().await != Some(Feedback::Controller(Direction::Receiving))
+            {
+            }
+            session.take_control.send_modify(|epoch| *epoch += 1);
+            loop {
+                match protocol::read(&mut session.peer).await.unwrap() {
+                    Message::ReturnControl => break,
+                    Message::Ping => {}
+                    _ => panic!("Expected control return request"),
+                }
+            }
+            protocol::write(&mut session.peer, &Message::Leave)
+                .await
+                .unwrap();
+            while session.feedback.recv().await != Some(Feedback::Controller(Direction::Local)) {}
+            session.stop.send_modify(|epoch| *epoch += 1);
+            session.task.await.unwrap().unwrap();
+        })
+        .await;
+}
+#[tokio::test]
+async fn edge_touch_without_enough_outward_motion_does_not_switch() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut session = Session::start().await;
+            session.capture.send(CaptureEvent::Begin { point: [999., 400.] }).await.unwrap();
+            session.capture.send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
+                time: 0, dx: 20., dy: 0.,
+            }))).await.unwrap();
+            while !matches!(session.feedback.recv().await, Some(Feedback::Handoff { progress, incoming: false }) if progress > 0.) {}
+            assert_eq!(session.trace.state.borrow().armed, Some(Side::Right));
+            let premature = tokio::time::timeout(Duration::from_millis(50), async {
+                loop {
+                    match protocol::read(&mut session.peer).await.unwrap() {
+                        Message::Enter(_) => break,
+                        Message::Ping => {},
+                        _ => panic!("Unexpected session message"),
+                    }
+                }
+            }).await;
+            assert!(premature.is_err(), "Edge touch transferred control too early");
+            session.capture.send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
+                time: 1, dx: 28., dy: 0.,
+            }))).await.unwrap();
+            loop {
+                match protocol::read(&mut session.peer).await.unwrap() {
+                    Message::Enter(_) => break,
+                    Message::Ping => {},
+                    _ => panic!("Expected handoff after resistance"),
+                }
+            }
+            session.stop.send_modify(|epoch| *epoch += 1);
+            session.task.await.unwrap().unwrap();
+        }).await;
+}
+#[tokio::test]
+async fn peer_can_return_control_without_stopping_sharing() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut session = Session::start().await;
+            session
+                .capture
+                .send(CaptureEvent::Begin {
+                    point: [999., 400.],
+                })
+                .await
+                .unwrap();
+            session.push_through().await;
+            loop {
+                match protocol::read(&mut session.peer).await.unwrap() {
+                    Message::Enter(_) => break,
+                    Message::Ping => {}
+                    _ => panic!("Expected handoff"),
+                }
+            }
+            protocol::write(&mut session.peer, &Message::ReturnControl)
+                .await
+                .unwrap();
+            loop {
+                match protocol::read(&mut session.peer).await.unwrap() {
+                    Message::Leave => break,
+                    Message::Ping => {}
+                    _ => panic!("Expected leave"),
+                }
+            }
+            session
+                .trace
+                .wait_for(|state| state.armed == Some(Side::Right))
+                .await;
+            assert!(session.trace.state.borrow().injected.iter().any(|event| {
+                matches!(event, Input::Motion { x, y } if (*x - 0.5).abs() < 0.01 && (*y - 0.5).abs() < 0.01)
+            }));
+            protocol::write(&mut session.peer, &Message::ReturnControl)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert!(!session.task.is_finished());
+            assert!(!session.trace.state.borrow().closed);
+            session.stop.send_modify(|epoch| *epoch += 1);
+            session.task.await.unwrap().unwrap();
         })
         .await;
 }
@@ -294,6 +437,7 @@ async fn only_the_selected_monitor_edge_enters_the_peer() {
                 })
                 .await
                 .unwrap();
+            session.push_through().await;
             let Message::Enter(point) = protocol::read(&mut session.peer).await.unwrap() else {
                 panic!("Expected entry from selected monitor");
             };
@@ -326,6 +470,7 @@ async fn remote_motion_can_reach_another_local_monitor_and_return() {
                 })
                 .await
                 .unwrap();
+            session.push_through().await;
             let entry = loop {
                 match protocol::read(&mut session.peer).await.unwrap() {
                     Message::Enter(point) => break point,
@@ -393,13 +538,17 @@ async fn stalled_display_exchange(stop_requested: bool) {
                 .trust(fingerprint.clone(), "Test peer".into())
                 .unwrap();
             let (stop, receiver) = watch::channel(0);
+            let (_, control_rx) = watch::channel(0);
             let (status, _) = mpsc::channel(16);
+            let (feedback, _) = mpsc::channel(16);
             let signals = Signals {
                 stop: receiver,
                 stop_request: stop.clone(),
                 store: Rc::new(RefCell::new(store)),
                 fingerprint,
                 status,
+                feedback,
+                take_control: control_rx,
             };
             // The peer neither reads nor writes. The first frame cannot fit.
             let (stream, _peer) = tokio::io::duplex(1);

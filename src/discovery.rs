@@ -1,4 +1,7 @@
-use crate::store::{validate_fingerprint, validate_name};
+use crate::{
+    protocol::VERSION,
+    store::{validate_fingerprint, validate_name},
+};
 use anyhow::{Result, ensure};
 use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::{
@@ -54,13 +57,14 @@ impl Discovery {
         daemon.set_ip_check_interval(2)?;
         let instance = format!("Ravel-{}", &fp[..16]);
         let hostname = format!("ravel-{}.local.", &fp[..16]);
+        let version = VERSION.to_string();
         let info = ServiceInfo::new(
             SERVICE,
             &instance,
             &hostname,
             "",
             port,
-            &[("name", name), ("fp", fp), ("version", "2")][..],
+            &[("name", name), ("fp", fp), ("version", &version)][..],
         )?
         .enable_addr_auto();
         let fullname = info.get_fullname().to_owned();
@@ -69,6 +73,7 @@ impl Discovery {
     }
     pub async fn run(self, own_fp: String, updates: mpsc::Sender<Vec<Peer>>) -> Result<()> {
         let receiver = self.daemon.browse(SERVICE)?;
+        let version = VERSION.to_string();
         let mut peers: BTreeMap<String, Peer> = BTreeMap::new();
         let mut refresh = tokio::time::interval(Duration::from_secs(15));
         loop {
@@ -82,7 +87,7 @@ impl Discovery {
                         ServiceEvent::ServiceResolved(info)=>{
                             let name=info.get_property_val_str("name").unwrap_or("");
                             let fp=info.get_property_val_str("fp").unwrap_or("");
-                            if fp==own_fp || validate_name(name).is_err() || validate_fingerprint(fp).is_err() || info.get_property_val_str("version")!=Some("2") {continue;}
+                            if fp==own_fp || validate_name(name).is_err() || validate_fingerprint(fp).is_err() || info.get_property_val_str("version")!=Some(version.as_str()) {continue;}
                             let addresses=info.get_addresses_v4().into_iter().map(|ip|SocketAddr::new(IpAddr::V4(ip),info.port)).filter(|addr|lan_ip(addr.ip()) && addr.port()!=0).take(8).collect::<Vec<_>>();
                             if addresses.is_empty() || (peers.len()>=64 && !peers.contains_key(&info.fullname)) {continue;}
                             peers.insert(info.fullname.clone(),Peer{service:info.fullname.clone(),name:name.into(),fingerprint:fp.into(),addresses});

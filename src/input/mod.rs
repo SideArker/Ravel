@@ -144,7 +144,11 @@ impl Backend {
                 repeat: None,
             })
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            anyhow::bail!("macOS input backend is not implemented yet; see docs/compatibility.md")
+        }
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             anyhow::bail!("This OS is unsupported")
         }

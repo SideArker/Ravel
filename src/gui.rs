@@ -3,6 +3,7 @@ use crate::{
     geometry::{Layout, Monitor, Side},
     identity::pretty_fingerprint,
     runtime::{Command, Event, Worker},
+    session::{Direction, Feedback},
     store::TrustedPeer,
 };
 use eframe::egui::{self, Color32, RichText};
@@ -27,6 +28,13 @@ enum UpdateState {
     Current,
     Failed(String),
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PairStep {
+    Device,
+    Pin,
+    Fingerprint,
+    Ready,
+}
 pub struct App {
     worker: Worker,
     name: String,
@@ -36,11 +44,14 @@ pub struct App {
     selected_monitor: Option<String>,
     port: u16,
     enabled: bool,
+    controller: Option<Direction>,
+    handoff: Option<(f32, bool, Instant)>,
     peers: Vec<Peer>,
     trusted: BTreeMap<String, TrustedPeer>,
     address: String,
     pin: String,
     selected: Option<String>,
+    pair_step: PairStep,
     layout: Layout,
     offer: Option<(Zeroizing<String>, Instant)>,
     confirmations: Vec<Confirmation>,
@@ -59,11 +70,14 @@ impl App {
             selected_monitor: None,
             port: 0,
             enabled: false,
+            controller: None,
+            handoff: None,
             peers: vec![],
             trusted: BTreeMap::new(),
             address: String::new(),
             pin: String::new(),
             selected: None,
+            pair_step: PairStep::Device,
             layout: Layout::default(),
             offer: None,
             confirmations: vec![],
@@ -88,7 +102,12 @@ impl App {
     fn update_events(&mut self) {
         while let Ok(event) = self.worker.events.try_recv() {
             match event {
-                Event::Status(value) => self.status = value,
+                Event::Status(value) => {
+                    if value.starts_with("Pairing failed") {
+                        self.pair_step = PairStep::Pin;
+                    }
+                    self.status = value;
+                }
                 Event::Backend(value) => self.backend = value,
                 Event::Monitors(value) => self.monitors = value,
                 Event::SelectedMonitor(value) => self.selected_monitor = value,
@@ -99,6 +118,9 @@ impl App {
                         && let Some(peer) = self.trusted.get(fp)
                     {
                         self.layout = peer.layout;
+                        if self.pair_step == PairStep::Fingerprint {
+                            self.pair_step = PairStep::Ready;
+                        }
                     }
                 }
                 Event::Pin { value, deadline } => self.offer = Some((value, deadline)),
@@ -108,14 +130,38 @@ impl App {
                     name,
                     deadline,
                     reply,
-                } => self.confirmations.push(Confirmation {
-                    fingerprint,
-                    name,
-                    deadline,
-                    reply,
-                }),
+                } => {
+                    let address = if self.selected.as_deref() == Some(&fingerprint)
+                        || self.selected.is_none()
+                    {
+                        Some(self.address.clone())
+                    } else {
+                        self.peers
+                            .iter()
+                            .find(|peer| peer.fingerprint == fingerprint)
+                            .and_then(|peer| peer.addresses.first().map(ToString::to_string))
+                    };
+                    self.select(fingerprint.clone(), address);
+                    self.pair_step = PairStep::Fingerprint;
+                    self.confirmations.push(Confirmation {
+                        fingerprint,
+                        name,
+                        deadline,
+                        reply,
+                    });
+                }
                 Event::Listening(port) => self.port = port,
                 Event::Enabled(enabled) => self.enabled = enabled,
+                Event::Feedback(feedback) => match feedback {
+                    Feedback::Controller(direction) => self.controller = Some(direction),
+                    Feedback::Handoff { progress, incoming } => {
+                        self.handoff = Some((progress, incoming, Instant::now()));
+                    }
+                    Feedback::Disconnected => {
+                        self.controller = None;
+                        self.handoff = None;
+                    }
+                },
             }
         }
         if self
@@ -150,6 +196,7 @@ impl App {
         self.layout = self.trusted.get(&fp).map(|p| p.layout).unwrap_or_default();
         self.selected = Some(fp);
         self.address = address.unwrap_or_default();
+        self.pair_step = PairStep::Device;
     }
 
     fn show_devices(&mut self, ui: &mut egui::Ui) {
@@ -218,7 +265,16 @@ impl App {
     }
 
     fn show_connection(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Connect");
+        ui.heading("4. Connect and share");
+        ui.horizontal(|ui| {
+            ui.label("Device address");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.address)
+                    .hint_text("192.168.1.20:4243")
+                    .char_limit(255)
+                    .desired_width(240.),
+            );
+        });
         let selected_trusted = self
             .selected
             .as_ref()
@@ -250,9 +306,32 @@ impl App {
     }
 
     fn show_pairing(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Pair a new device")
-            .default_open(self.trusted.is_empty())
-            .show(ui, |ui| {
+        ui.heading("Connect a device");
+        ui.label("1. Find device  →  2. PIN  →  3. Check fingerprint");
+        match self.pair_step {
+            PairStep::Device => {
+                self.show_devices(ui);
+                ui.add_space(6.);
+                if ui
+                    .add_enabled(
+                        self.selected.is_some() || !self.address.is_empty(),
+                        egui::Button::new("Continue to PIN"),
+                    )
+                    .clicked()
+                {
+                    self.pair_step = if self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|fp| self.trusted.contains_key(fp))
+                    {
+                        PairStep::Ready
+                    } else {
+                        PairStep::Pin
+                    };
+                }
+            }
+            PairStep::Pin => {
+                ui.label("On one device, show a PIN. On the other, enter that PIN below.");
                 ui.horizontal(|ui| {
                     if ui.button("Show PIN on this device").clicked() {
                         self.command(Command::OfferPin);
@@ -280,7 +359,9 @@ impl App {
                     );
                     if ui
                         .add_enabled(
-                            !self.address.is_empty() && self.pin.len() == 8,
+                            !self.address.is_empty()
+                                && self.pin.len() == 8
+                                && self.pin.bytes().all(|b| b.is_ascii_digit()),
                             egui::Button::new("Pair using PIN"),
                         )
                         .clicked()
@@ -292,10 +373,39 @@ impl App {
                             pin,
                             expected: self.selected.clone(),
                         });
+                        self.pair_step = PairStep::Fingerprint;
                     }
                 });
-                ui.small("Both devices will ask you to compare and approve fingerprints.");
-            });
+                ui.small(
+                    "The device showing the PIN can leave this step open while the other connects.",
+                );
+                if ui.button("Back to devices").clicked() {
+                    self.pair_step = PairStep::Device;
+                }
+            }
+            PairStep::Fingerprint => {
+                ui.label(
+                    "3. Compare the full fingerprint on each screen and approve on both devices.",
+                );
+                ui.label("This device's fingerprint:");
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(pretty_fingerprint(&self.worker.identity.fingerprint))
+                            .monospace(),
+                    )
+                    .selectable(true),
+                );
+                if ui.button("Back to PIN").clicked() {
+                    self.pair_step = PairStep::Pin;
+                }
+            }
+            PairStep::Ready => {
+                ui.label("Pairing complete. Set the handoff edge, then connect.");
+                if ui.button("Choose another device").clicked() {
+                    self.pair_step = PairStep::Device;
+                }
+            }
+        }
     }
 
     fn show_handoff(&mut self, ui: &mut egui::Ui) {
@@ -412,6 +522,7 @@ impl App {
                     self.command(Command::Revoke(fp));
                     self.selected = None;
                     self.address.clear();
+                    self.pair_step = PairStep::Device;
                 }
             }
             ui.horizontal(|ui| {
@@ -423,6 +534,7 @@ impl App {
             ui.small("Nearby names and addresses are unverified until pairing is approved.");
             ui.small("Emergency stop: Ctrl+Alt+Shift+Esc while sending, or run ravel --stop locally.");
             ui.small("Wayland requires wlroots protocols and a compositor stop binding. See docs/operation.md.");
+            ui.small("GNOME/KDE Wayland and macOS input backends are planned. See docs/compatibility.md.");
         });
     }
 }
@@ -449,6 +561,9 @@ impl eframe::App for App {
                         self.worker.stop();
                         self.enabled = false;
                         self.offer = None;
+                    }
+                    if ui.button("Minimize to background").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
                 });
             });
@@ -478,6 +593,45 @@ impl eframe::App for App {
                 ("Sharing is off", Color32::from_rgb(230, 180, 90))
             };
             ui.colored_label(color, RichText::new(summary).strong());
+            match self.controller {
+                Some(Direction::Sending) => {
+                    ui.colored_label(
+                        Color32::from_rgb(100, 200, 130),
+                        RichText::new("Controller: THIS DEVICE → other device").strong(),
+                    );
+                }
+                Some(Direction::Receiving) => {
+                    ui.colored_label(
+                        Color32::from_rgb(230, 180, 90),
+                        RichText::new("Controller: OTHER DEVICE → this device").strong(),
+                    );
+                    if ui.button("Take control on this device").clicked() {
+                        self.command(Command::TakeControl);
+                    }
+                }
+                Some(Direction::Local) => {
+                    ui.strong("Controller: each device uses its own input");
+                }
+                None => {}
+            }
+            if let Some((progress, incoming, since)) = self.handoff
+                && (progress < 1. && since.elapsed() < Duration::from_secs(2)
+                    || progress >= 1. && since.elapsed() < Duration::from_millis(900))
+            {
+                let shown = if incoming && progress >= 1. {
+                    (since.elapsed().as_secs_f32() / 0.6).min(1.)
+                } else {
+                    progress
+                };
+                ui.add(egui::ProgressBar::new(shown).text(if incoming {
+                    "Control entering this device"
+                } else if progress >= 1. {
+                    "Control switched to the other device"
+                } else {
+                    "Push through the edge to switch"
+                }));
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
             if self.backend.starts_with("Backend unavailable")
                 || (!self.status.starts_with("Sharing stopped")
                     && !self.status.starts_with("Sharing allowed"))
@@ -496,23 +650,20 @@ impl eframe::App for App {
                 let width = ui.available_width() - 24.;
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_min_width(width);
-                    self.show_devices(ui);
-                });
-                ui.add_space(8.);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(width);
-                    self.show_connection(ui);
-                });
-                ui.add_space(8.);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(width);
                     self.show_pairing(ui);
                 });
-                ui.add_space(8.);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(width);
-                    self.show_handoff(ui);
-                });
+                if self.pair_step == PairStep::Ready {
+                    ui.add_space(8.);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(width);
+                        self.show_handoff(ui);
+                    });
+                    ui.add_space(8.);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(width);
+                        self.show_connection(ui);
+                    });
+                }
                 ui.add_space(8.);
                 self.show_details(ui);
             });
@@ -520,7 +671,7 @@ impl eframe::App for App {
         if let Some(c) = self.confirmations.first() {
             let mut answer = None;
             egui::Window::new("Verify the device fingerprint").collapsible(false).resizable(false).show(ctx,|ui|{
-                ui.label(format!("The PIN exchange succeeded with {}.",c.name));ui.label("Compare this full fingerprint with the one under Details & troubleshooting on that device:");
+                ui.label(format!("The PIN exchange succeeded with {}.",c.name));ui.label("Compare this full fingerprint with the one shown as 'This device's fingerprint' on the other device:");
                 ui.add(egui::Label::new(RichText::new(pretty_fingerprint(&c.fingerprint)).monospace()).selectable(true));
                 ui.label(format!("Approval expires in {}s",c.deadline.saturating_duration_since(Instant::now()).as_secs()));
                 ui.horizontal(|ui|{if ui.button("Fingerprints match — trust device").clicked(){answer=Some(true);}

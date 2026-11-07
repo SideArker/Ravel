@@ -8,23 +8,36 @@ See [verification](verification.md) for exactly what has been exercised.
 
 1. Run `ravel --name "Arch laptop"` and `ravel --name "Windows laptop"` on the
    same trusted LAN. The default TCP port is 4243; `--port` changes it.
-2. Choose **Find monitors / check input** on each device. If there are multiple active
-   monitors, select the monitor whose outer edge should connect to the peer.
-   Fix any reported missing protocol, display, or permission issue before sharing.
-3. On one machine select **Show PIN on this device**. On the other select the
-   discovered peer (or enter `192.168.x.y:4243`), enter that eight-digit PIN, and
-   choose **Pair using PIN**.
-4. Compare the full peer fingerprint shown in each approval dialog against the
-   fingerprint under **Details & troubleshooting** on the other screen. Approve
+2. In **Find device**, select the discovered peer on each machine, or enter
+   `192.168.x.y:4243` if discovery is unavailable. Continue to **PIN**.
+3. On one machine select **Show PIN on this device**. On the other, enter that
+   eight-digit PIN and choose **Pair using PIN**.
+4. In **Check fingerprint**, compare the full peer fingerprint in each approval dialog against the
+   fingerprint shown as **This device's fingerprint** on the other screen. Approve
    on **both** devices only when they match. A discovery name or fingerprint hint
    is not proof.
-5. Select the paired device and configure Left/Right/Top/Bottom under
-   **Handoff edge**. Adjust **Fine tune alignment** if needed and choose
-   **Save handoff edge**. Then choose **Allow incoming control** on the receiving
+5. Choose **Find monitors / check input** on each device. If there are multiple
+   active monitors, select the monitor whose outer edge should connect to the peer.
+   Fix any reported missing protocol, display, or permission issue before sharing.
+   Configure Left/Right/Top/Bottom under **Handoff edge**. Adjust **Fine tune alignment**
+   if needed and choose **Save handoff edge**. Then choose **Allow incoming control** on the receiving
    device and **Connect to device** on the initiating device. Connecting also
    allows sharing locally.
-6. Move through the configured edge. Both devices can be the sender; local
-   capture is disabled while receiving. Crossing back returns control.
+6. Push outward through the configured edge until the handoff indicator fills.
+   Mouse and keyboard input then go to the other device. Both devices can be the
+   sender; the header shows which device currently controls the other. The
+   receiving device can press **Take control on this device** to return control
+   locally; crossing back also returns control. Local capture is disabled while
+   receiving. The indicator animates inside both Ravel windows when control moves.
+
+Both devices must run protocol version 3 after this update. The connection is
+OS-neutral: Linux↔Linux, Windows↔Windows and Linux↔Windows use the same pairing
+and TLS session, subject to the local backend working on each endpoint. See the
+[compatibility plan](compatibility.md) for desktop coverage and macOS/GNOME/KDE work.
+
+Minimizing the window leaves the network worker and active sharing running.
+Closing the window stops sharing. Ravel does not currently have a tray icon or
+start automatically at login.
 
 A positive alignment shifts the peer down along a vertical edge, or right along
 a horizontal edge. Values are fractions of the edge length, so 0.25 is 25%.

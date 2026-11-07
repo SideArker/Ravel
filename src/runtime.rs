@@ -4,7 +4,7 @@ use crate::{
     identity::Identity,
     pairing::{self, Binding, Offer},
     protocol::{self, Message, VERSION},
-    session::{self, Signals},
+    session::{self, Feedback, Signals},
     store::{Store, TrustedPeer, validate_name},
     tls,
 };
@@ -45,6 +45,7 @@ pub enum Command {
         fingerprint: String,
         layout: Layout,
     },
+    TakeControl,
 }
 pub enum Event {
     Status(String),
@@ -66,6 +67,7 @@ pub enum Event {
     },
     Listening(u16),
     Enabled(bool),
+    Feedback(Feedback),
 }
 pub struct Worker {
     pub commands: mpsc::Sender<Command>,
@@ -155,6 +157,7 @@ struct Context {
     events: mpsc::Sender<Event>,
     name: String,
     stop: watch::Sender<u64>,
+    take_control: watch::Sender<u64>,
     enabled: Cell<bool>,
     session: Arc<Semaphore>,
     handshakes: Arc<Semaphore>,
@@ -215,6 +218,7 @@ async fn work(
         events,
         name,
         stop,
+        take_control: watch::channel(0).0,
         enabled: Cell::new(false),
         session: Arc::new(Semaphore::new(1)),
         handshakes: Arc::new(Semaphore::new(4)),
@@ -270,6 +274,7 @@ async fn work(
                     Command::Connect{address,expected}=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));desired=Some(Target::new(address,expected));reconnect.reset_immediately();Ok(())},
                     Command::Revoke(fp)=>{ctx.stop.send_modify(|e|*e=e.wrapping_add(1));let result=ctx.store.borrow_mut().revoke(&fp);ctx.trusted_update();result},
                     Command::Layout{fingerprint,layout}=>{let result=ctx.store.borrow_mut().set_layout(&fingerprint,layout);ctx.trusted_update();result},
+                    Command::TakeControl=>{ctx.take_control.send_modify(|epoch|*epoch=epoch.wrapping_add(1));Ok(())},
                 };if let Err(e)=result{ctx.status(e.to_string());}
             },
             Some(found)=discovery_rx.recv()=>{peers=found;let _=ctx.events.try_send(Event::Peers(peers.clone()));},
@@ -562,10 +567,15 @@ async fn control(
         .map_err(|_| anyhow!("Another control session is active"))?;
     let layout = ctx.store.borrow().layout(&fp);
     let (status_tx, mut status_rx) = mpsc::channel(16);
+    let (feedback_tx, mut feedback_rx) = mpsc::channel(32);
     let events = ctx.events.clone();
     let forwarder = tokio::task::spawn_local(async move {
-        while let Some(status) = status_rx.recv().await {
-            let _ = events.try_send(Event::Status(status));
+        loop {
+            tokio::select! {
+                Some(status) = status_rx.recv() => { let _ = events.try_send(Event::Status(status)); },
+                Some(feedback) = feedback_rx.recv() => { let _ = events.try_send(Event::Feedback(feedback)); },
+                else => break,
+            }
         }
     });
     let result = session::run(
@@ -578,10 +588,13 @@ async fn control(
             store: ctx.store.clone(),
             fingerprint: fp,
             status: status_tx,
+            feedback: feedback_tx,
+            take_control: ctx.take_control.subscribe(),
         },
     )
     .await;
     forwarder.abort();
+    let _ = ctx.events.try_send(Event::Feedback(Feedback::Disconnected));
     ctx.trusted_update();
     ctx.status("Disconnected — held input released");
     result
@@ -609,6 +622,7 @@ mod tests {
             events,
             name: name.into(),
             stop,
+            take_control: watch::channel(0).0,
             enabled: Cell::new(true),
             session: Arc::new(Semaphore::new(1)),
             handshakes: Arc::new(Semaphore::new(4)),
@@ -837,12 +851,15 @@ mod control_transport_tests {
                 let (server, server_peer) = server.unwrap().unwrap();
                 let signals = |ctx: &Context, fingerprint| {
                     let (status, _) = mpsc::channel(16);
+                    let (feedback, _) = mpsc::channel(16);
                     Signals {
                         stop: ctx.stop.subscribe(),
                         stop_request: ctx.stop.clone(),
                         store: ctx.store.clone(),
                         fingerprint,
                         status,
+                        feedback,
+                        take_control: ctx.take_control.subscribe(),
                     }
                 };
                 let (backend_a, capture, trace_a) = Backend::test();
@@ -867,6 +884,16 @@ mod control_transport_tests {
                     .send(CaptureEvent::Begin {
                         point: [999., 400.],
                     })
+                    .await
+                    .unwrap();
+                capture
+                    .send(CaptureEvent::Input(InputEvent::Pointer(
+                        PointerEvent::Motion {
+                            time: 0,
+                            dx: 50.,
+                            dy: 0.,
+                        },
+                    )))
                     .await
                     .unwrap();
                 capture

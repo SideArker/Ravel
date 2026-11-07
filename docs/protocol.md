@@ -1,4 +1,4 @@
-# Protocol and threat model (version 2)
+# Protocol and threat model (version 3)
 
 Ravel is an IPv4 LAN application for two devices. Discovery is an untrusted hint.
 Names and addresses never authorize input. No backend, UDP input, plaintext
@@ -62,6 +62,12 @@ the full desktop; only the selected monitor's outer edge transfers control.
 Each input stream needs an Enter before Input and Leave before
 another Enter. Receiving disables capture to prevent echo. All keys, modifiers
 and mouse buttons are released on leave, error, stop, timeout and normal exit.
+An outward 48-unit push at the edge is required before Enter. A receiving device
+can send ReturnControl over the authenticated session; the sender responds with
+Leave and releases capture. The receiver releases held input on Leave. A return
+request after Leave is harmless. Conflicting ownership still fails the session.
+Version 2 peers are excluded
+by the version check and discovery filter, so both devices must update together.
 
 Heartbeats every 1 second, inbound inactivity timeout 4 seconds. Read/write and
 handshake operations have deadlines. The complete display exchange (write and
