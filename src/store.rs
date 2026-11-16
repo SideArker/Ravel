@@ -21,6 +21,8 @@ struct Data {
     peers: BTreeMap<String, TrustedPeer>,
     #[serde(default)]
     monitor: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 pub struct Store {
     path: PathBuf,
@@ -38,6 +40,9 @@ impl Store {
         if let Some(id) = &data.monitor {
             validate_monitor_id(id)?;
         }
+        if let Some(name) = &data.name {
+            validate_name(name)?;
+        }
         for (fp, peer) in &data.peers {
             validate_fingerprint(fp)?;
             validate_name(&peer.name)?;
@@ -50,6 +55,15 @@ impl Store {
     }
     pub fn monitor(&self) -> Option<&str> {
         self.data.monitor.as_deref()
+    }
+    pub fn name(&self) -> Option<&str> {
+        self.data.name.as_deref()
+    }
+    pub fn set_name(&mut self, name: String) -> Result<()> {
+        validate_name(&name)?;
+        let mut next = self.data.clone();
+        next.name = Some(name);
+        self.save(next)
     }
     pub fn set_monitor(&mut self, id: String) -> Result<()> {
         validate_monitor_id(&id)?;
@@ -82,6 +96,19 @@ impl Store {
                 layout: Layout::default(),
             },
         );
+        self.save(next)
+    }
+    pub fn set_peer_name(&mut self, fp: &str, name: String) -> Result<()> {
+        validate_name(&name)?;
+        let mut next = self.data.clone();
+        let peer = next
+            .peers
+            .get_mut(fp)
+            .ok_or_else(|| anyhow::anyhow!("Peer is not trusted"))?;
+        if peer.name == name {
+            return Ok(());
+        }
+        peer.name = name;
         self.save(next)
     }
     pub fn revoke(&mut self, fp: &str) -> Result<()> {
@@ -145,9 +172,14 @@ mod tests {
         };
         s.set_layout(&fp, layout).unwrap();
         s.set_monitor("DISPLAY2".into()).unwrap();
+        s.set_name("My Ravel laptop".into()).unwrap();
+        s.set_peer_name(&fp, "Renamed peer".into()).unwrap();
         let mut s = Store::load(dir.path()).unwrap();
         assert_eq!(s.layout(&fp), layout);
         assert_eq!(s.monitor(), Some("DISPLAY2"));
+        assert_eq!(s.name(), Some("My Ravel laptop"));
+        assert_eq!(s.peers()[&fp].name, "Renamed peer");
+        assert!(s.set_name(String::new()).is_err());
         assert!(!s.trusted(&"cd".repeat(32)));
         s.revoke(&fp).unwrap();
         assert!(!Store::load(dir.path()).unwrap().trusted(&fp));

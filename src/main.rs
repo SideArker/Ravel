@@ -5,7 +5,12 @@ use ravel::{
     identity,
     runtime::{self, Worker},
 };
-use std::{path::PathBuf, time::Duration};
+use std::{
+    fs::OpenOptions,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::Duration,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -28,11 +33,10 @@ fn main() {
 }
 fn run() -> Result<()> {
     let mut directory = None;
-    let mut name = std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "Ravel device".into());
+    let mut name = None;
     let mut port = 4243;
     let mut stop = false;
+    let mut kill_all = false;
     let mut probe = false;
     let mut smoke = false;
     let mut args = std::env::args().skip(1);
@@ -43,14 +47,15 @@ fn run() -> Result<()> {
                     args.next().context("--state-dir needs a path")?,
                 ))
             }
-            "--name" => name = args.next().context("--name needs a device name")?,
+            "--name" => name = Some(args.next().context("--name needs a device name")?),
             "--port" => port = args.next().context("--port needs a number")?.parse()?,
             "--stop" => stop = true,
+            "--kill-all" => kill_all = true,
             "--probe-backend" => probe = true,
             "--smoke-gui" => smoke = true,
             "--help" | "-h" => {
                 println!(
-                    "Ravel — LAN mouse & keyboard sharing\n\nOptions: --name NAME --port PORT --state-dir PATH --stop --probe-backend --smoke-gui\nSee README.md and docs/operation.md for pairing, backends and stop bindings."
+                    "Ravel — LAN mouse & keyboard sharing\n\nOptions: --name NAME --port PORT --state-dir PATH --stop --kill-all --probe-backend --smoke-gui\nSee README.md and docs/operation.md for pairing, backends and stop bindings."
                 );
                 return Ok(());
             }
@@ -62,6 +67,9 @@ fn run() -> Result<()> {
         .unwrap_or_else(identity::default_directory)?;
     if stop {
         return runtime::request_stop(&directory);
+    }
+    if kill_all {
+        return runtime::request_shutdown(&directory);
     }
     if probe {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -78,18 +86,85 @@ fn run() -> Result<()> {
             backend.close().await
         });
     }
-    let worker = Worker::start(directory, name.clone(), port)?;
-    let options = eframe::NativeOptions {
+    if !smoke && std::env::var_os("RAVEL_DAEMON_CHILD").is_none() {
+        return start_or_show_daemon(&directory);
+    }
+    let store = ravel::store::Store::load(&directory)?;
+    let name = store.name().map(str::to_owned).or(name).unwrap_or_else(|| {
+        std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "Ravel device".into())
+    });
+    let peers = store.peers();
+    let auto_connect = (peers.len() == 1).then(|| peers.into_keys().next().unwrap());
+    let worker = Worker::start(directory, name.clone(), port, auto_connect)?;
+    #[allow(unused_mut)] // Linux may select Xwayland for reversible tray hiding.
+    let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_app_id("ravel")
             .with_inner_size([760., 680.])
             .with_min_inner_size([640., 560.]),
         ..Default::default()
     };
+    #[cfg(target_os = "linux")]
+    let can_hide = std::env::var_os("DISPLAY").is_some() && x11rb::connect(None).is_ok();
+    #[cfg(not(target_os = "linux"))]
+    let can_hide = true;
+    #[cfg(target_os = "linux")]
+    if can_hide {
+        // Wayland/winit cannot hide and later remap a toplevel. Xwayland gives
+        // this GUI a reversible hide operation while input still uses Wayland.
+        options.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }));
+    }
     eframe::run_native(
         "Ravel",
         options,
-        Box::new(move |_| Ok(Box::new(App::new(worker, name, smoke)))),
+        Box::new(move |_| Ok(Box::new(App::new(worker, name, smoke, can_hide)))),
     )
     .map_err(|e| anyhow::anyhow!("Cannot launch GUI: {e}"))
+}
+
+fn start_or_show_daemon(directory: &Path) -> Result<()> {
+    match identity::lock_directory(directory) {
+        Ok(lock) => drop(lock),
+        Err(error) => {
+            if runtime::request_show(directory).is_ok() {
+                return Ok(());
+            }
+            return Err(error);
+        }
+    }
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(std::env::args_os().skip(1))
+        .env("RAVEL_DAEMON_CHILD", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    let mut log_options = OpenOptions::new();
+    log_options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::{fs::OpenOptionsExt, process::CommandExt};
+        log_options.mode(0o600);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0000_0008); // DETACHED_PROCESS
+    }
+    command.stderr(Stdio::from(log_options.open(directory.join("daemon.log"))?));
+    command.spawn()?;
+    Ok(())
 }

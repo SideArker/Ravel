@@ -45,9 +45,12 @@ pub enum Command {
         fingerprint: String,
         layout: Layout,
     },
+    SetName(String),
     TakeControl,
 }
 pub enum Event {
+    Show,
+    Name(String),
     Status(String),
     Backend(String),
     Monitors(Vec<Monitor>),
@@ -68,6 +71,7 @@ pub enum Event {
     Listening(u16),
     Enabled(bool),
     Feedback(Feedback),
+    Exited(Option<String>),
 }
 pub struct Worker {
     pub commands: mpsc::Sender<Command>,
@@ -79,11 +83,23 @@ pub struct Worker {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
-    pub fn start(directory: PathBuf, name: String, port: u16) -> Result<Self> {
+    pub fn start(
+        directory: PathBuf,
+        name: String,
+        port: u16,
+        auto_connect: Option<String>,
+    ) -> Result<Self> {
         validate_name(&name)?;
         let state_lock = crate::identity::lock_directory(&directory)?;
         let identity = Arc::new(Identity::load_or_create(&directory)?);
         let store = Store::load(&directory)?;
+        if let Some(fp) = &auto_connect {
+            crate::store::validate_fingerprint(fp)?;
+            ensure!(
+                store.trusted(fp),
+                "Auto-connect peer must already be paired"
+            );
+        }
         let (commands, rx) = mpsc::channel(32);
         let (tx, events) = mpsc::channel(128);
         let (stop, _) = watch::channel(0);
@@ -100,7 +116,7 @@ impl Worker {
                     Ok(runtime) => {
                         let local = tokio::task::LocalSet::new();
                         let event_tx = tx.clone();
-                        if let Err(e) = runtime.block_on(local.run_until(work(
+                        let result = runtime.block_on(local.run_until(work(
                             directory,
                             name,
                             port,
@@ -110,14 +126,19 @@ impl Worker {
                             tx,
                             stop_thread,
                             quit_rx,
-                        ))) {
+                            auto_connect,
+                        )));
+                        if let Err(e) = &result {
                             let _ =
                                 event_tx.try_send(Event::Status(format!("Service stopped: {e}")));
                         }
+                        let _ =
+                            event_tx.try_send(Event::Exited(result.err().map(|e| e.to_string())));
                     }
                     Err(e) => {
-                        let _ =
-                            tx.try_send(Event::Status(format!("Cannot start network worker: {e}")));
+                        let _ = tx.try_send(Event::Exited(Some(format!(
+                            "Cannot start network worker: {e}"
+                        ))));
                     }
                 }
             })?;
@@ -153,9 +174,10 @@ impl Drop for Worker {
 struct Context {
     identity: Arc<Identity>,
     store: Rc<RefCell<Store>>,
+    allowed_peer: Option<String>,
     offer: RefCell<Option<Offer>>,
     events: mpsc::Sender<Event>,
-    name: String,
+    name: RefCell<String>,
     stop: watch::Sender<u64>,
     take_control: watch::Sender<u64>,
     enabled: Cell<bool>,
@@ -210,16 +232,18 @@ async fn work(
     events: mpsc::Sender<Event>,
     stop: watch::Sender<u64>,
     mut quit: watch::Receiver<bool>,
+    auto_connect: Option<String>,
 ) -> Result<()> {
     let ctx = Rc::new(Context {
         identity,
         store: Rc::new(RefCell::new(store)),
+        allowed_peer: auto_connect.clone(),
         offer: RefCell::new(None),
         events,
-        name,
+        name: RefCell::new(name),
         stop,
         take_control: watch::channel(0).0,
-        enabled: Cell::new(false),
+        enabled: Cell::new(auto_connect.is_some()),
         session: Arc::new(Semaphore::new(1)),
         handshakes: Arc::new(Semaphore::new(4)),
     });
@@ -231,15 +255,25 @@ async fn work(
         ctx.store.borrow().monitor().map(str::to_owned),
     ));
     let _ = ctx.events.try_send(Event::Listening(port));
-    ctx.status("Sharing stopped. Pair devices, then allow sharing on the receiving device.");
+    if let Some(fp) = &auto_connect {
+        let _ = ctx.events.try_send(Event::Enabled(true));
+        if ctx.identity.fingerprint.as_str() < fp.as_str() {
+            ctx.status("Waiting for the paired device on the LAN");
+        } else {
+            ctx.status("Ready for the paired device to connect");
+        }
+    } else {
+        ctx.status("Sharing stopped. Pair devices, then allow sharing on the receiving device.");
+    }
     let (discovery_tx, mut discovery_rx) = mpsc::channel(8);
     let mut discovery_task = None;
-    match Discovery::new(&ctx.name, &ctx.identity.fingerprint, port) {
+    match Discovery::new(&ctx.name.borrow(), &ctx.identity.fingerprint, port) {
         Ok(discovery) => {
             let events = ctx.events.clone();
             let fp = ctx.identity.fingerprint.clone();
+            let updates = discovery_tx.clone();
             discovery_task = Some(tokio::task::spawn_local(async move {
-                if let Err(e) = discovery.run(fp, discovery_tx).await {
+                if let Err(e) = discovery.run(fp, updates).await {
                     let _ = events.try_send(Event::Status(format!(
                         "Discovery unavailable; manual address still works: {e}"
                     )));
@@ -252,7 +286,11 @@ async fn work(
     }
     let mut tasks = JoinSet::new();
     let mut peers: Vec<Peer> = vec![];
-    let mut desired: Option<Target> = None;
+    // The lower fingerprint initiates so two auto-connect peers cannot race for both session slots.
+    let mut desired = auto_connect.and_then(|fp| {
+        (ctx.identity.fingerprint.as_str() < fp.as_str())
+            .then(|| Target::new(String::new(), Some(fp)))
+    });
     let outbound = Rc::new(Cell::new(false));
     let mut stopped = ctx.stop.subscribe();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -261,19 +299,37 @@ async fn work(
         tokio::select! {
             biased;
             _=quit.changed()=>break,
-            _=stopped.changed()=>{ctx.disable();desired=None;ctx.status("Sharing stopped — all control connections released");},
+            _=stopped.changed()=>{ctx.disable();ctx.status("Sharing stopped — all control connections released");},
             Some(result)=tasks.join_next()=>{if let Err(e)=result{ctx.status(format!("Connection task failed: {e}"));}},
             Some(command)=commands.recv()=>{
                 let result:Result<()>=match command {
                     Command::OfferPin=>{let offer=Offer::new(Instant::now());let _=ctx.events.try_send(Event::Pin{value:Zeroizing::new(offer.display_pin()),deadline:offer.deadline});*ctx.offer.borrow_mut()=Some(offer);Ok(())},
                     Command::CancelPin=>{ctx.offer.borrow_mut().take();let _=ctx.events.try_send(Event::PinClosed);Ok(())},
-                    Command::Enable=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));ctx.status("Sharing allowed for trusted devices");Ok(())},
+                    Command::Enable=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));reconnect.reset_immediately();ctx.status("Sharing allowed for trusted devices");Ok(())},
                     Command::Probe=>{let events=ctx.events.clone();tasks.spawn_local(async move{let message=match crate::input::Backend::new().await{Ok(mut b)=>{let _=events.try_send(Event::Monitors(b.monitors.clone()));let text=format!("{} — {} active monitor(s); constructor check only",b.label,b.monitors.len());match b.close().await{Ok(())=>text,Err(e)=>format!("Backend cleanup failed: {e}")}},Err(e)=>format!("Backend unavailable: {e:#}")};let _=events.try_send(Event::Backend(message));});Ok(())},
                     Command::Monitor(id)=>{let result=ctx.store.borrow_mut().set_monitor(id.clone());if result.is_ok(){let _=ctx.events.try_send(Event::SelectedMonitor(Some(id)));ctx.status("Handoff monitor saved for the next connection");}result},
                     Command::Pair{address,pin,expected}=>{let context=ctx.clone();let flag=outbound.clone();if flag.replace(true){Err(anyhow!("An outgoing connection is already in progress"))}else{tasks.spawn_local(async move{let result=outgoing(context.clone(),Target::new(address,expected),Some(pin)).await;flag.set(false);if let Err(e)=result{context.status(format!("Pairing failed: {e}"));}});Ok(())}},
                     Command::Connect{address,expected}=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));desired=Some(Target::new(address,expected));reconnect.reset_immediately();Ok(())},
                     Command::Revoke(fp)=>{ctx.stop.send_modify(|e|*e=e.wrapping_add(1));let result=ctx.store.borrow_mut().revoke(&fp);ctx.trusted_update();result},
                     Command::Layout{fingerprint,layout}=>{let result=ctx.store.borrow_mut().set_layout(&fingerprint,layout);ctx.trusted_update();result},
+                    Command::SetName(name)=>{
+                        let result=ctx.store.borrow_mut().set_name(name.clone());
+                        if result.is_ok(){
+                            *ctx.name.borrow_mut()=name.clone();
+                            let _=ctx.events.try_send(Event::Name(name.clone()));
+                            if let Some(task)=discovery_task.take(){task.abort();let _=task.await;}
+                            match Discovery::new(&name,&ctx.identity.fingerprint,port){
+                                Ok(discovery)=>{
+                                    let events=ctx.events.clone();let fp=ctx.identity.fingerprint.clone();let updates=discovery_tx.clone();
+                                    discovery_task=Some(tokio::task::spawn_local(async move{
+                                        if let Err(e)=discovery.run(fp,updates).await{let _=events.try_send(Event::Status(format!("Discovery unavailable; manual address still works: {e}")));}
+                                    }));
+                                },
+                                Err(e)=>ctx.status(format!("Name saved, but discovery is unavailable: {e}")),
+                            }
+                        }
+                        result
+                    },
                     Command::TakeControl=>{ctx.take_control.send_modify(|epoch|*epoch=epoch.wrapping_add(1));Ok(())},
                 };if let Err(e)=result{ctx.status(e.to_string());}
             },
@@ -287,6 +343,14 @@ async fn work(
                 tasks.spawn_local(async move{let _permit=permit;let result=incoming(context.clone(),stream,server).await;if let Err(e)=result{context.status(format!("Incoming connection ended: {e}"));}});
             },
             _=tick.tick()=>{
+                if directory.join("show.request").try_exists()? {
+                    std::fs::remove_file(directory.join("show.request"))?;
+                    let _ = ctx.events.try_send(Event::Show);
+                }
+                if directory.join("shutdown.request").try_exists()? {
+                    std::fs::remove_file(directory.join("shutdown.request"))?;
+                    break;
+                }
                 if directory.join("stop.request").try_exists()?{let _=std::fs::remove_file(directory.join("stop.request"));ctx.stop.send_modify(|e|*e=e.wrapping_add(1));}
                 if ctx.offer.borrow().as_ref().is_some_and(|o|Instant::now()>=o.deadline){ctx.offer.borrow_mut().take();let _=ctx.events.try_send(Event::PinClosed);}
             },
@@ -297,6 +361,7 @@ async fn work(
                             if !ctx.store.borrow().trusted(fp){desired=None;continue;}
                             if let Some(peer)=peers.iter().find(|p|&p.fingerprint==fp) && let Some(address)=peer.addresses.first(){target.address=address.to_string();}
                         }
+                        if target.address.is_empty() { continue; }
                         outbound.set(true);let context=ctx.clone();let flag=outbound.clone();tasks.spawn_local(async move{let result=outgoing(context.clone(),target,None).await;flag.set(false);if let Err(e)=result{context.status(format!("Disconnected; retrying while sharing is allowed: {e}"));}});
                 }
             }
@@ -401,11 +466,12 @@ async fn authorize(
         }
     };
     if initiator {
+        let local_name = ctx.name.borrow().clone();
         protocol::write(
             &mut stream,
             &Message::Hello {
                 version: VERSION,
-                name: ctx.name.clone(),
+                name: local_name,
                 pairing: pin.is_some(),
             },
         )
@@ -428,11 +494,12 @@ async fn authorize(
         requested_pairing
     };
     if !initiator {
+        let local_name = ctx.name.borrow().clone();
         protocol::write(
             &mut stream,
             &Message::Hello {
                 version: VERSION,
-                name: ctx.name.clone(),
+                name: local_name,
                 pairing,
             },
         )
@@ -441,9 +508,20 @@ async fn authorize(
     if !pairing {
         ensure!(ctx.enabled.get(), "Sharing stopped on this device");
         ensure!(
+            ctx.allowed_peer
+                .as_ref()
+                .is_none_or(|allowed| allowed == &fp),
+            "Peer is not selected for automatic sharing"
+        );
+        ensure!(
             ctx.store.borrow().trusted(&fp),
             "Unknown or revoked fingerprint; pair explicitly first"
         );
+        if let Err(error) = ctx.store.borrow_mut().set_peer_name(&fp, name) {
+            ctx.status(format!("Could not save the device's updated name: {error}"));
+        } else {
+            ctx.trusted_update();
+        }
         return Ok(Some((stream, fp)));
     }
     let (client_fp, server_fp) = if initiator {
@@ -601,13 +679,81 @@ async fn control(
 }
 
 pub fn request_stop(directory: &std::path::Path) -> Result<()> {
-    crate::identity::atomic_private(&directory.join("stop.request"), b"stop", true)
+    request_control(directory, "stop.request")
+}
+
+pub fn request_shutdown(directory: &std::path::Path) -> Result<()> {
+    request_control(directory, "shutdown.request")
+}
+
+pub fn request_show(directory: &std::path::Path) -> Result<()> {
+    request_control(directory, "show.request")
+}
+
+fn request_control(directory: &std::path::Path, filename: &str) -> Result<()> {
+    let lock_path = directory.join("instance.lock");
+    crate::identity::read_private(&lock_path)?;
+    let lock = std::fs::File::open(lock_path)?;
+    match lock.try_lock() {
+        Ok(()) => bail!("No Ravel instance is running in this state directory"),
+        Err(std::fs::TryLockError::WouldBlock) => {}
+        Err(error) => return Err(error.into()),
+    }
+    crate::identity::atomic_private(&directory.join(filename), b"stop", true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pairing::PIN_LIFETIME;
+
+    #[test]
+    fn autoconnect_requires_existing_trust() {
+        let directory = tempfile::tempdir().unwrap();
+        let fingerprint = "ab".repeat(32);
+        let result = Worker::start(
+            directory.path().to_owned(),
+            "Test device".into(),
+            0,
+            Some(fingerprint),
+        );
+        assert!(result.is_err_and(|error| error.to_string().contains("already be paired")));
+    }
+
+    #[tokio::test]
+    async fn device_name_change_is_saved_for_next_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut worker =
+            Worker::start(directory.path().to_owned(), "Old name".into(), 0, None).unwrap();
+        worker.command(Command::SetName("New name".into())).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = worker.events.recv().await {
+                if let Event::Name(name) = event {
+                    assert_eq!(name, "New name");
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(worker);
+        assert_eq!(
+            Store::load(directory.path()).unwrap().name(),
+            Some("New name")
+        );
+    }
+
+    #[test]
+    fn shutdown_request_requires_running_instance() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock = crate::identity::lock_directory(directory.path()).unwrap();
+        request_shutdown(directory.path()).unwrap();
+        assert!(directory.path().join("shutdown.request").exists());
+        std::fs::remove_file(directory.path().join("shutdown.request")).unwrap();
+        drop(lock);
+        assert!(request_shutdown(directory.path()).is_err());
+        assert!(!directory.path().join("shutdown.request").exists());
+    }
 
     pub(super) fn context(name: &str) -> (tempfile::TempDir, Rc<Context>, mpsc::Receiver<Event>) {
         let dir = tempfile::tempdir().unwrap();
@@ -618,9 +764,10 @@ mod tests {
         let ctx = Rc::new(Context {
             identity,
             store,
+            allowed_peer: None,
             offer: RefCell::new(None),
             events,
-            name: name.into(),
+            name: RefCell::new(name.into()),
             stop,
             take_control: watch::channel(0).0,
             enabled: Cell::new(true),
@@ -786,6 +933,26 @@ mod tests {
             authorize(b.clone(), server, false, None)
         );
         assert!(rb.is_err());
+    }
+    #[tokio::test]
+    async fn autoconnect_receiver_rejects_other_trusted_peers() {
+        let (_da, a, _ea) = context("Alice");
+        let (_db, mut b, _eb) = context("Bob");
+        a.store
+            .borrow_mut()
+            .trust(b.identity.fingerprint.clone(), "Bob".into())
+            .unwrap();
+        b.store
+            .borrow_mut()
+            .trust(a.identity.fingerprint.clone(), "Alice".into())
+            .unwrap();
+        Rc::get_mut(&mut b).unwrap().allowed_peer = Some("cd".repeat(32));
+        let (client, server) = sockets(&a, &b).await;
+        let (_, receiver) = tokio::join!(
+            authorize(a.clone(), client, true, None),
+            authorize(b.clone(), server, false, None)
+        );
+        assert!(receiver.unwrap_err().to_string().contains("not selected"));
     }
     #[tokio::test]
     async fn untrusted_input_frame_cannot_pass_the_authorization_gate() {

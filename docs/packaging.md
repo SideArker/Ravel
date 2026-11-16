@@ -2,7 +2,8 @@
 
 Tagged releases currently publish a Linux x86_64 tarball and Windows x64 ZIP, with user-level
 install scripts in `install.sh` and `install.ps1`. These install the binary only;
-there is no service, autostart integration or code signing. Do not distribute the
+login autostart is configured separately in [background operation](background.md). There
+is no system service or code signing. Do not distribute the
 state directory, identity keys, PINs, logs or `target` tree.
 
 The Linux script installs to `~/.local/bin` (or `RAVEL_INSTALL_DIR`), upgrades
@@ -54,8 +55,9 @@ cargo build --release --locked
 ./target/release/ravel
 ```
 
-Runtime needs the native GUI/graphics stack, X11 libraries for the X11 path, and
-libxkbcommon. `ldd target/release/ravel` identifies the binary's actual linked
+Runtime needs the native GUI/graphics stack, X11 libraries for the X11 path,
+Xwayland for tray hiding in a Wayland session, and libxkbcommon.
+`ldd target/release/ravel` identifies the binary's actual linked
 libraries on the build machine. Build on Arch for the Arch package; a binary
 built on a different glibc distribution is not an Arch compatibility test.
 

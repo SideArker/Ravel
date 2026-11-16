@@ -6,8 +6,8 @@ See [verification](verification.md) for exactly what has been exercised.
 
 ## First connection
 
-1. Run `ravel --name "Arch laptop"` and `ravel --name "Windows laptop"` on the
-   same trusted LAN. The default TCP port is 4243; `--port` changes it.
+1. Run `ravel` on each device on the same trusted LAN. Set a preferred name under
+   **Details & troubleshooting**. The default TCP port is 4243; `--port` changes it.
 2. In **Find device**, select the discovered peer on each machine, or enter
    `192.168.x.y:4243` if discovery is unavailable. Continue to **PIN**.
 3. On one machine select **Show PIN on this device**. On the other, enter that
@@ -20,7 +20,7 @@ See [verification](verification.md) for exactly what has been exercised.
    active monitors, select the monitor whose outer edge should connect to the peer.
    Fix any reported missing protocol, display, or permission issue before sharing.
    Configure Left/Right/Top/Bottom under **Handoff edge**. Adjust **Fine tune alignment**
-   if needed and choose **Save handoff edge**. Then choose **Allow incoming control** on the receiving
+   if needed and choose **Save handoff edge**. Then choose **Start sharing** on the receiving
    device and **Connect to device** on the initiating device. Connecting also
    allows sharing locally.
 6. Push outward through the configured edge until the handoff indicator fills.
@@ -30,14 +30,25 @@ See [verification](verification.md) for exactly what has been exercised.
    locally; crossing back also returns control. Local capture is disabled while
    receiving. The indicator animates inside both Ravel windows when control moves.
 
+The connection panel shows one step title at a time: **Find device**, **Enter
+PIN**, **Check fingerprint**, then **Ready to connect**. Paired devices appear
+in green. Selecting one skips PIN and fingerprint approval; choose **Connect to
+device** if it is not connected. With exactly one paired device saved, Ravel
+also tries to reconnect automatically on startup. A PIN is only needed for
+first pairing or after unpairing.
+
 Both devices must run protocol version 3 after this update. The connection is
 OS-neutral: Linux↔Linux, Windows↔Windows, macOS↔macOS and mixed-OS pairs use the same pairing
 and TLS session, subject to the local backend working on each endpoint. See the
 [compatibility plan](compatibility.md) for desktop coverage and remaining native QA.
 
-Minimizing the window leaves the network worker and active sharing running.
-Closing the window stops sharing. Ravel does not currently have a tray icon or
-start automatically at login.
+Plain `ravel` starts a detached process. The GUI is visible without a connection
+and hides in the tray once connected. **Minimize to background** and the
+window's close button hide it sooner while the network worker continues.
+Click the tray icon, choose **Open Ravel** from its menu, or run `ravel` again
+to reopen it. A pure Wayland session without Xwayland cannot hide and restore
+this window. Login autostart is described in
+[background operation](background.md).
 
 A positive alignment shifts the peer down along a vertical edge, or right along
 a horizontal edge. Values are fractions of the edge length, so 0.25 is 25%.
@@ -53,11 +64,15 @@ change takes effect on the next connection.
 
 ## Stop and revoke
 
-**Stop sharing** disables incoming control, closes sessions, cancels PINs,
-releases held keys/buttons, and cancels automatic reconnect. Closing the window
-also stops sharing. Ctrl+Alt+Shift+Esc stops while sending; Windows and native X11
+**Stop sharing** disables incoming control, sends Stop to the connected peer,
+closes sessions, cancels PINs, releases held keys/buttons, and pauses automatic
+reconnect. The button then becomes **Start sharing**, which re-enables control
+and resumes connection attempts to the selected device. **Kill switch**, at the
+bottom of the window, also exits the local process. Closing the window
+hides it to the tray. Ctrl+Alt+Shift+Esc stops while sending; Windows and native X11
 and macOS also poll the chord while receiving. Local `ravel --stop` is an independent path
-that the worker checks every 100 ms. Use the same `--state-dir` if one was supplied.
+that the worker checks every 100 ms. `ravel --kill-all` stops sharing on the
+connected peer and exits the local process. Use the same `--state-dir` if one was supplied.
 Do not kill the process to stop normal sharing: OS-level abrupt termination cannot
 guarantee release delivery.
 

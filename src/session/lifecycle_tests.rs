@@ -155,6 +155,18 @@ async fn stop_releases_inputs_and_disarms_capture() {
             let mut session = Session::start().await;
             session.hold_inputs().await;
             session.stop.send_modify(|epoch| *epoch += 1);
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if matches!(
+                        protocol::read(&mut session.peer).await.unwrap(),
+                        Message::Stop
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("Stop was not delivered to the peer");
             session.task.await.unwrap().unwrap();
             Session::assert_released(&session.trace);
         })

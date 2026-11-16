@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
 };
 
 pub struct Signals {
@@ -168,6 +168,12 @@ fn send(tx: &mpsc::Sender<Message>, message: Message) -> Result<()> {
     tx.try_send(message)
         .map_err(|_| anyhow!("Session congested; sharing stopped"))
 }
+async fn send_stop(tx: &mpsc::Sender<oneshot::Sender<()>>) {
+    let (ack, delivered) = oneshot::channel();
+    if tx.try_send(ack).is_ok() {
+        let _ = tokio::time::timeout(Duration::from_secs(2), delivered).await;
+    }
+}
 async fn return_to_local(
     backend: &mut Backend,
     outgoing: &mpsc::Sender<Message>,
@@ -206,6 +212,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (incoming_tx, mut incoming) = mpsc::channel::<Result<Message>>(128);
     let (outgoing, mut outgoing_rx) = mpsc::channel(128);
+    let (urgent_stop, mut stop_rx) = mpsc::channel::<oneshot::Sender<()>>(1);
     let errors = incoming_tx.clone();
     let reader = tokio::task::spawn_local(async move {
         loop {
@@ -223,7 +230,13 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
         }
     });
     let writer = tokio::task::spawn_local(async move {
-        while let Some(message) = outgoing_rx.recv().await {
+        loop {
+            let (message, ack) = tokio::select! {
+                biased;
+                Some(ack) = stop_rx.recv() => (Message::Stop, Some(ack)),
+                Some(message) = outgoing_rx.recv() => (message, None),
+                else => break,
+            };
             let result = match tokio::time::timeout(
                 Duration::from_secs(2),
                 protocol::write(&mut writer, &message),
@@ -235,6 +248,10 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
             };
             if let Err(error) = result {
                 let _ = errors.send(Err(error)).await;
+                break;
+            }
+            if let Some(ack) = ack {
+                let _ = ack.send(());
                 break;
             }
         }
@@ -253,7 +270,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
         .try_send(Feedback::Controller(Direction::Local));
     loop {
         tokio::select! {
-            _=signals.stop.changed()=>{let _=send(&outgoing,Message::Stop);return Ok(());},
+            _=signals.stop.changed()=>{send_stop(&urgent_stop).await;return Ok(());},
             _=signals.take_control.changed()=>{
                 match direction {
                     Direction::Receiving => send(&outgoing, Message::ReturnControl)?,
@@ -324,14 +341,14 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                                 point=[point[0].clamp(0.,1.),point[1].clamp(0.,1.)];send(&outgoing,Message::Input(Input::Motion{x:point[0],y:point[1]}))?;
                             }
                         }else if let Some(input)=convert(event) {
-                            input.validate()?;held.update(input);if held.emergency_stop(){signals.stop_request.send_modify(|e| *e=e.wrapping_add(1));let _=send(&outgoing,Message::Stop);return Ok(());}
+                            input.validate()?;held.update(input);if held.emergency_stop(){signals.stop_request.send_modify(|e| *e=e.wrapping_add(1));send_stop(&urgent_stop).await;return Ok(());}
                             send(&outgoing,Message::Input(input))?;
                         }
                     }
                 }
             },
             _=heartbeat.tick()=>{backend.check_geometry()?;ensure!(signals.store.borrow().trusted(&signals.fingerprint),"Peer trust revoked");send(&outgoing,Message::Ping)?;},
-            _=tick.tick()=>{if backend.maintenance()? {signals.stop_request.send_modify(|e| *e=e.wrapping_add(1));return Ok(());}
+            _=tick.tick()=>{if backend.maintenance()? {signals.stop_request.send_modify(|e| *e=e.wrapping_add(1));send_stop(&urgent_stop).await;return Ok(());}
                 if handoff.as_ref().is_some_and(|gate|gate.expired(Instant::now())){handoff=None;backend.arm(None).await?;rearm_at=Some(Instant::now()+Duration::from_millis(350));let _=signals.feedback.try_send(Feedback::Handoff{progress:0.,incoming:false});}
                 if rearm_at.is_some_and(|t|Instant::now()>=t) && direction==Direction::Local{backend.arm(Some(layout.side)).await?;rearm_at=None;}},
         }

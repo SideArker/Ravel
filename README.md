@@ -19,7 +19,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 rustup toolchain install stable --profile minimal
 rustup component add rustfmt clippy
 cargo build --locked
-cargo run --locked -- --name "Arch laptop"
+cargo run --locked
 ```
 
 Follow the GUI steps: find the device, exchange a PIN, and compare and approve
@@ -27,10 +27,18 @@ fingerprints on both screens. Then configure the handoff edge, allow sharing, an
 connect. Keyboard presses and releases follow the pointer after it crosses the
 edge. Push outward at the handoff edge to switch; the receiving Ravel window
 can return control with one button. The active controller is shown on both
-windows. Minimize the window to keep Ravel running in the background; closing it
-stops sharing. The GUI has **Stop sharing**; local `ravel --stop` also disables
-control. Wayland users must configure the compositor stop binding described in
-the operation guide.
+windows. Plain `ravel` starts a detached process: the GUI stays open while no
+device is connected, then hides in the tray once connected. **Minimize to
+background** or close the window to hide it sooner; click the tray icon or run
+`ravel` again to reopen it. On Linux, hiding needs X11/Xwayland.
+Set this device's advertised name under **Details & troubleshooting**; Ravel
+remembers it after restart. A paired device can reconnect without another PIN.
+The GUI's **Stop sharing** button becomes **Start sharing** after control stops;
+local `ravel --stop` also disables control on both connected devices. The bottom
+**Kill switch** button or `ravel --kill-all` stops
+sharing and exits the local app. Ravel reconnects automatically when exactly
+one paired device is saved. See [background setup](docs/background.md) for login
+autostart.
 
 Ravel checks GitHub releases when the window opens. If a newer release exists,
 it shows a dismissible prompt with a link to that release. You can check again
@@ -67,9 +75,11 @@ wlroots-compatible Wayland and native X11 have local constructor or isolated
 test evidence. The new GNOME/KDE portal and macOS paths require native tests,
 and macOS release packaging requires a Developer ID signing identity. All
 backends still need two-device certification. No clipboard, files, mobile app,
-cloud services or autostart are included.
+cloud services or installer-managed autostart are included.
 
 - [Pairing, backends, stop bindings and firewall setup](docs/operation.md)
+- [Background operation and login autostart](docs/background.md)
+- [Desktop crossover effect design](docs/desktop-effect.md)
 - [Protocol, limits and threat model](docs/protocol.md)
 - [Build and packaging on Arch / Windows](docs/packaging.md)
 - [Verification evidence and remaining release gates](docs/verification.md)

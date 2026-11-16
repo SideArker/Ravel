@@ -14,7 +14,43 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
+use tray_icon::{
+    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    menu::{Menu, MenuEvent, MenuItem},
+};
 use zeroize::{Zeroize, Zeroizing};
+
+#[derive(Clone, Copy)]
+enum TrayAction {
+    Show,
+    Quit,
+}
+
+fn tray_icon() -> anyhow::Result<Icon> {
+    // A small, self-contained R glyph so the tray works without an external asset path.
+    let rows = [
+        0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+    ];
+    let mut rgba = Vec::with_capacity(32 * 32 * 4);
+    for y in 0..32 {
+        for x in 0..32 {
+            let in_square = (2..30).contains(&x)
+                && (2..30).contains(&y)
+                && !(!(5..27).contains(&x) && !(5..27).contains(&y));
+            let letter = (6..26).contains(&x)
+                && (2..30).contains(&y)
+                && rows[(y - 2) / 4] & (1 << (4 - (x - 6) / 4)) != 0;
+            rgba.extend_from_slice(if letter {
+                &[255, 255, 255, 255]
+            } else if in_square {
+                &[94, 57, 191, 255]
+            } else {
+                &[0, 0, 0, 0]
+            });
+        }
+    }
+    Ok(Icon::from_rgba(rgba, 32, 32)?)
+}
 
 struct Confirmation {
     fingerprint: String,
@@ -38,6 +74,7 @@ enum PairStep {
 pub struct App {
     worker: Worker,
     name: String,
+    name_draft: String,
     status: String,
     backend: String,
     monitors: Vec<Monitor>,
@@ -50,6 +87,7 @@ pub struct App {
     trusted: BTreeMap<String, TrustedPeer>,
     address: String,
     pin: String,
+    pairing_pending: bool,
     selected: Option<String>,
     pair_step: PairStep,
     layout: Layout,
@@ -58,11 +96,21 @@ pub struct App {
     updates: UpdateState,
     show_update: bool,
     exit_at: Option<Instant>,
+    exited: bool,
+    quitting: bool,
+    connected: bool,
+    can_hide: bool,
+    tray: Option<TrayIcon>,
+    tray_failed: bool,
+    tray_sender: mpsc::Sender<TrayAction>,
+    tray_events: Receiver<TrayAction>,
 }
 impl App {
-    pub fn new(worker: Worker, name: String, smoke: bool) -> Self {
+    pub fn new(worker: Worker, name: String, smoke: bool, can_hide: bool) -> Self {
+        let (tray_sender, tray_events) = mpsc::channel();
         Self {
             worker,
+            name_draft: name.clone(),
             name,
             status: "Starting LAN service…".into(),
             backend: "Backend has not been checked. Check it before enabling sharing.".into(),
@@ -76,6 +124,7 @@ impl App {
             trusted: BTreeMap::new(),
             address: String::new(),
             pin: String::new(),
+            pairing_pending: false,
             selected: None,
             pair_step: PairStep::Device,
             layout: Layout::default(),
@@ -84,7 +133,90 @@ impl App {
             updates: Self::start_update_check(),
             show_update: false,
             exit_at: smoke.then(|| Instant::now() + Duration::from_secs(3)),
+            exited: false,
+            quitting: false,
+            connected: false,
+            can_hide,
+            tray: None,
+            tray_failed: false,
+            tray_sender,
+            tray_events,
         }
+    }
+    fn ensure_tray(&mut self, ctx: &egui::Context) {
+        if self.tray.is_some() || self.tray_failed {
+            return;
+        }
+        let build = || -> anyhow::Result<TrayIcon> {
+            let menu = Menu::new();
+            let open = MenuItem::new("Open Ravel", true, None);
+            let quit = MenuItem::new("Quit Ravel and stop sharing", true, None);
+            menu.append(&open)?;
+            menu.append(&quit)?;
+            let icon = TrayIconBuilder::new()
+                .with_icon(tray_icon()?)
+                .with_tooltip("Ravel")
+                .with_menu(Box::new(menu))
+                .with_menu_on_left_click(false)
+                .build()?;
+            let sender = self.tray_sender.clone();
+            let repaint = ctx.clone();
+            TrayIconEvent::set_event_handler(Some(move |event| {
+                if matches!(
+                    event,
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } | TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    }
+                ) {
+                    let _ = sender.send(TrayAction::Show);
+                    repaint.request_repaint();
+                }
+            }));
+            let sender = self.tray_sender.clone();
+            let repaint = ctx.clone();
+            let open_id = open.id().clone();
+            let quit_id = quit.id().clone();
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                let action = if event.id == open_id {
+                    Some(TrayAction::Show)
+                } else if event.id == quit_id {
+                    Some(TrayAction::Quit)
+                } else {
+                    None
+                };
+                if let Some(action) = action {
+                    let _ = sender.send(action);
+                    repaint.request_repaint();
+                }
+            }));
+            Ok(icon)
+        };
+        match build() {
+            Ok(icon) => {
+                self.tray = Some(icon);
+            }
+            Err(error) => {
+                self.tray_failed = true;
+                self.status = format!("System tray unavailable: {error:#}");
+            }
+        }
+    }
+    fn show_window(ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+    fn hide_window(ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        self.worker.stop();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
     fn start_update_check() -> UpdateState {
         let (tx, rx) = mpsc::channel();
@@ -99,12 +231,24 @@ impl App {
             self.status = e.to_string();
         }
     }
-    fn update_events(&mut self) {
+    fn update_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.worker.events.try_recv() {
             match event {
+                Event::Show => Self::show_window(ctx),
+                Event::Name(name) => {
+                    self.name_draft = name.clone();
+                    self.name = name;
+                }
                 Event::Status(value) => {
                     if value.starts_with("Pairing failed") {
+                        self.pairing_pending = false;
                         self.pair_step = PairStep::Pin;
+                    }
+                    if value.starts_with("Connected") && !self.connected {
+                        self.connected = true;
+                        if self.tray.is_some() && self.can_hide {
+                            Self::hide_window(ctx);
+                        }
                     }
                     self.status = value;
                 }
@@ -119,6 +263,7 @@ impl App {
                     {
                         self.layout = peer.layout;
                         if self.pair_step == PairStep::Fingerprint {
+                            self.pairing_pending = false;
                             self.pair_step = PairStep::Ready;
                         }
                     }
@@ -131,6 +276,8 @@ impl App {
                     deadline,
                     reply,
                 } => {
+                    Self::show_window(ctx);
+                    self.pairing_pending = false;
                     let address = if self.selected.as_deref() == Some(&fingerprint)
                         || self.selected.is_none()
                     {
@@ -152,12 +299,22 @@ impl App {
                 }
                 Event::Listening(port) => self.port = port,
                 Event::Enabled(enabled) => self.enabled = enabled,
+                Event::Exited(error) => {
+                    if let Some(error) = error {
+                        self.status = error;
+                    }
+                    self.exited = true;
+                }
                 Event::Feedback(feedback) => match feedback {
                     Feedback::Controller(direction) => self.controller = Some(direction),
                     Feedback::Handoff { progress, incoming } => {
                         self.handoff = Some((progress, incoming, Instant::now()));
                     }
                     Feedback::Disconnected => {
+                        if self.connected {
+                            self.connected = false;
+                            Self::show_window(ctx);
+                        }
                         self.controller = None;
                         self.handoff = None;
                     }
@@ -213,10 +370,14 @@ impl App {
                 .and_then(|found| found.addresses.first().map(ToString::to_string));
             ui.horizontal(|ui| {
                 if ui
-                    .selectable_label(self.selected.as_ref() == Some(&fp), &peer.name)
+                    .selectable_label(
+                        self.selected.as_ref() == Some(&fp),
+                        RichText::new(&peer.name).color(Color32::from_rgb(100, 200, 130)),
+                    )
                     .clicked()
                 {
                     self.select(fp.clone(), address.clone());
+                    self.pair_step = PairStep::Ready;
                 }
                 ui.weak(if address.is_some() {
                     "Paired · nearby"
@@ -241,6 +402,7 @@ impl App {
                         peer.fingerprint.clone(),
                         peer.addresses.first().map(ToString::to_string),
                     );
+                    self.pair_step = PairStep::Pin;
                 }
                 ui.weak("New · pair first");
             });
@@ -265,7 +427,7 @@ impl App {
     }
 
     fn show_connection(&mut self, ui: &mut egui::Ui) {
-        ui.heading("4. Connect and share");
+        ui.heading("Connect and share");
         ui.horizontal(|ui| {
             ui.label("Device address");
             ui.add(
@@ -285,29 +447,32 @@ impl App {
         } else if self.address.is_empty() {
             ui.label("Choose a nearby paired device or enter its address.");
         }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    !self.address.is_empty() && !selected_new,
-                    egui::Button::new("Connect to device"),
-                )
-                .clicked()
-            {
-                self.command(Command::Connect {
-                    address: self.address.clone(),
-                    expected: self.selected.clone(),
-                });
-            }
-            if !self.enabled && ui.button("Allow incoming control").clicked() {
-                self.command(Command::Enable);
-            }
-        });
-        ui.small("The receiving device must allow incoming control.");
+        if ui
+            .add_enabled(
+                !self.address.is_empty() && !selected_new,
+                egui::Button::new("Connect to device"),
+            )
+            .clicked()
+        {
+            self.command(Command::Connect {
+                address: self.address.clone(),
+                expected: self.selected.clone(),
+            });
+        }
+        ui.small("The receiving device must start sharing.");
     }
 
     fn show_pairing(&mut self, ui: &mut egui::Ui) {
         ui.heading("Connect a device");
-        ui.label("1. Find device  →  2. PIN  →  3. Check fingerprint");
+        ui.label(
+            RichText::new(match self.pair_step {
+                PairStep::Device => "Find device",
+                PairStep::Pin => "Enter PIN",
+                PairStep::Fingerprint => "Check fingerprint",
+                PairStep::Ready => "Ready to connect",
+            })
+            .strong(),
+        );
         match self.pair_step {
             PairStep::Device => {
                 self.show_devices(ui);
@@ -315,7 +480,7 @@ impl App {
                 if ui
                     .add_enabled(
                         self.selected.is_some() || !self.address.is_empty(),
-                        egui::Button::new("Continue to PIN"),
+                        egui::Button::new("Continue"),
                     )
                     .clicked()
                 {
@@ -361,31 +526,43 @@ impl App {
                         .add_enabled(
                             !self.address.is_empty()
                                 && self.pin.len() == 8
-                                && self.pin.bytes().all(|b| b.is_ascii_digit()),
-                            egui::Button::new("Pair using PIN"),
+                                && self.pin.bytes().all(|b| b.is_ascii_digit())
+                                && !self.pairing_pending,
+                            egui::Button::new(if self.pairing_pending {
+                                "Checking PIN…"
+                            } else {
+                                "Pair using PIN"
+                            }),
                         )
                         .clicked()
                     {
                         let pin = Zeroizing::new(self.pin.clone());
                         self.pin.zeroize();
-                        self.command(Command::Pair {
+                        let result = self.worker.command(Command::Pair {
                             address: self.address.clone(),
                             pin,
                             expected: self.selected.clone(),
                         });
-                        self.pair_step = PairStep::Fingerprint;
+                        if let Err(error) = result {
+                            self.status = error.to_string();
+                        } else {
+                            self.pairing_pending = true;
+                        }
                     }
                 });
                 ui.small(
                     "The device showing the PIN can leave this step open while the other connects.",
                 );
+                if self.status.starts_with("Pairing failed") {
+                    ui.colored_label(Color32::from_rgb(230, 100, 100), &self.status);
+                }
                 if ui.button("Back to devices").clicked() {
                     self.pair_step = PairStep::Device;
                 }
             }
             PairStep::Fingerprint => {
                 ui.label(
-                    "3. Compare the full fingerprint on each screen and approve on both devices.",
+                    "Compare the full fingerprint on each screen and approve on both devices.",
                 );
                 ui.label("This device's fingerprint:");
                 ui.add(
@@ -400,7 +577,7 @@ impl App {
                 }
             }
             PairStep::Ready => {
-                ui.label("Pairing complete. Set the handoff edge, then connect.");
+                ui.label("This device is paired. Connect without entering a PIN again.");
                 if ui.button("Choose another device").clicked() {
                     self.pair_step = PairStep::Device;
                 }
@@ -493,16 +670,40 @@ impl App {
                 ui.label(format!("Installed v{}", env!("CARGO_PKG_VERSION")));
             });
             match &self.updates {
-                UpdateState::Checking(_) => { ui.small("Checking GitHub releases…"); }
+                UpdateState::Checking(_) => {
+                    ui.small("Checking GitHub releases…");
+                }
                 UpdateState::Available(version) => {
                     if ui.button(format!("Update v{version} available")).clicked() {
                         self.show_update = true;
                     }
                 }
-                UpdateState::Current => { ui.small("No newer release found."); }
-                UpdateState::Failed(error) => { ui.small(format!("Update check failed: {error}")); }
+                UpdateState::Current => {
+                    ui.small("No newer release found.");
+                }
+                UpdateState::Failed(error) => {
+                    ui.small(format!("Update check failed: {error}"));
+                }
             }
-            ui.label(format!("This device: {} · TCP port {}", self.name, self.port));
+            ui.horizontal(|ui| {
+                ui.label("This device's name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.name_draft)
+                        .char_limit(64)
+                        .desired_width(220.),
+                );
+                let next_name = self.name_draft.trim().to_owned();
+                if ui
+                    .add_enabled(
+                        !next_name.is_empty() && next_name != self.name,
+                        egui::Button::new("Save name"),
+                    )
+                    .clicked()
+                {
+                    self.command(Command::SetName(next_name));
+                }
+            });
+            ui.label(format!("TCP port {}", self.port));
             ui.label("This device's fingerprint:");
             ui.add(
                 egui::Label::new(
@@ -511,7 +712,11 @@ impl App {
                 )
                 .selectable(true),
             );
-            if let Some(fp) = self.selected.clone().filter(|fp| self.trusted.contains_key(fp)) {
+            if let Some(fp) = self
+                .selected
+                .clone()
+                .filter(|fp| self.trusted.contains_key(fp))
+            {
                 ui.label("Selected device's fingerprint:");
                 ui.add(
                     egui::Label::new(RichText::new(pretty_fingerprint(&fp)).monospace())
@@ -532,38 +737,64 @@ impl App {
                 ui.label(&self.backend);
             });
             ui.small("Nearby names and addresses are unverified until pairing is approved.");
-            ui.small("Emergency stop: Ctrl+Alt+Shift+Esc while sending, or run ravel --stop locally.");
-            ui.small("Wayland needs either wlroots input protocols or working InputCapture and RemoteDesktop portals. Configure a compositor stop binding; see docs/operation.md.");
-            ui.small("Portal and macOS backends need native validation before release; see docs/compatibility.md.");
+            ui.small(
+                "Emergency stop: Ctrl+Alt+Shift+Esc while sending, or run ravel --stop locally.",
+            );
+            ui.small(format!("Latest status: {}", self.status));
         });
     }
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.update_events();
+        self.ensure_tray(ctx);
+        while let Ok(action) = self.tray_events.try_recv() {
+            match action {
+                TrayAction::Show => Self::show_window(ctx),
+                TrayAction::Quit => self.quit(ctx),
+            }
+        }
+        self.update_events(ctx);
         ctx.request_repaint_after(Duration::from_millis(100));
-        if self.exit_at.is_some_and(|t| Instant::now() >= t) {
+        if self.exited || self.exit_at.is_some_and(|t| Instant::now() >= t) {
+            self.quitting = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if ctx.input(|input| input.viewport().close_requested()) && !self.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.tray.is_some() && self.can_hide {
+                Self::hide_window(ctx);
+            } else {
+                self.status = "Hiding needs a system tray and X11/Xwayland on Linux".into();
+            }
         }
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.);
             ui.horizontal(|ui| {
                 ui.heading("Ravel");
-                ui.weak(format!("v{} · on {}", env!("CARGO_PKG_VERSION"), self.name));
+                ui.weak(format!("v{}", env!("CARGO_PKG_VERSION")));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Stop sharing").color(Color32::WHITE))
-                                .fill(Color32::from_rgb(160, 45, 45)),
-                        )
-                        .clicked()
-                    {
-                        self.worker.stop();
-                        self.enabled = false;
-                        self.offer = None;
-                    }
                     if ui.button("Minimize to background").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        if self.tray.is_some() && self.can_hide {
+                            Self::hide_window(ctx);
+                        } else {
+                            self.status =
+                                "Hiding needs a system tray and X11/Xwayland on Linux".into();
+                        }
+                    }
+                    let sharing_button = if self.enabled {
+                        egui::Button::new(RichText::new("Stop sharing").color(Color32::WHITE))
+                            .fill(Color32::from_rgb(160, 45, 45))
+                    } else {
+                        egui::Button::new("Start sharing")
+                    };
+                    if ui.add(sharing_button).clicked() {
+                        if self.enabled {
+                            self.worker.stop();
+                            self.enabled = false;
+                            self.offer = None;
+                        } else {
+                            self.command(Command::Enable);
+                        }
                     }
                 });
             });
@@ -632,18 +863,19 @@ impl eframe::App for App {
                 }));
                 ctx.request_repaint_after(Duration::from_millis(16));
             }
-            if self.backend.starts_with("Backend unavailable")
-                || (!self.status.starts_with("Sharing stopped")
-                    && !self.status.starts_with("Sharing allowed"))
-            {
-                ui.small(if self.backend.starts_with("Backend unavailable") {
-                    &self.backend
-                } else {
-                    &self.status
-                });
-            }
             ui.add_space(8.);
         });
+        egui::TopBottomPanel::bottom("bottom_actions")
+            .exact_height(40.)
+            .show(ctx, |ui| {
+                ui.add_space(6.);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Kill switch").clicked() {
+                        self.quit(ctx);
+                    }
+                });
+                ui.add_space(6.);
+            });
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.);

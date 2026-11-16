@@ -1,5 +1,42 @@
 # Implementation evidence and release gates
 
+## 2026-11-15 background GUI correction
+
+Plain `ravel` now spawns a detached process containing the GUI and network worker.
+The GUI stays visible without a connection and hides after connection; tray
+activation or another `ravel` launch reopens it.
+On this Hyprland/Wayland host, winit's native Wayland visibility command had no
+effect. Ravel now uses Xwayland for the GUI when `DISPLAY` is present, while
+its input backend continues to select Wayland. In an isolated state directory,
+the tray item registered on D-Bus, no Ravel window was mapped while backgrounded,
+and activating the tray item remapped the window. The tray menu's **Quit**
+event stopped and exited Ravel. A new isolated run confirmed plain `ravel`
+returned within three seconds, the detached child became its own session leader
+with stdin on `/dev/null`, its unpaired GUI was mapped, a second launch reused
+that child, and `--kill-all` exited it.
+
+Current checks: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace --locked` (49 passed, 3 environment checks ignored),
+`cargo build --release --locked`, and `git diff --check` passed. The Stop path
+is covered by a session test that reads the Stop frame from the peer and checks
+held-input cleanup.
+
+The close-button and **Minimize to background** paths share the same hide command.
+The desktop was locked during the new run, so a real button click and live
+auto-hide after connection still need manual checks. The tray Windows and macOS
+behavior, login autostart after reboot, and a live two-device reconnection also
+need native checks. A run with
+`DISPLAY` unset confirmed the native Wayland fallback leaves the GUI visible;
+winit cannot hide and later restore that toplevel.
+
+The device-name update stores the local name in the private state file and
+restarts the mDNS advertisement. A worker test changes the name through its
+command channel and checks the saved value after shutdown; the store test
+checks that a renamed trusted peer keeps its handoff layout. The GUI now shows
+only the active connection step and skips PIN for a selected trusted peer.
+Those visual transitions still need a manual desktop check.
+
 ## 2026-11-07 compatibility implementation
 
 The Linux Wayland selector now tries the complete wlroots capture/injection
@@ -163,7 +200,7 @@ laptops were not available, so input interoperability cannot be certified here.
 Implemented Wayland coverage is **wlroots-compatible protocols**, not all Wayland
 compositors. GNOME/KDE portal/libei support is not implemented. Missing protocols
 and multiple outputs report errors. Windows elevated/secure desktops are excluded.
-There is no clipboard/file transfer, cloud relay, IPv6, autostart or installer.
+There is no clipboard/file transfer, cloud relay, IPv6 or installer-managed autostart.
 
 Mixed scale pointer speed is not calibrated on real machines. Wayland receiver
 emergency stop requires the documented compositor binding; a generic unfocused
