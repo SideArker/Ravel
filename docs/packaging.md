@@ -27,7 +27,7 @@ On a Mac with Xcode Command Line Tools, Rust 1.99 or newer, and a Developer ID
 Application certificate installed in the keychain:
 
 ```sh
-export RAVEL_VERSION=0.4.0
+export RAVEL_VERSION=0.5.0
 export RAVEL_CODESIGN_IDENTITY='Developer ID Application: Example (TEAMID)'
 sh package/macos.sh
 ```

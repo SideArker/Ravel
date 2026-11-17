@@ -2,7 +2,7 @@
 set -eu
 
 : "${RAVEL_CODESIGN_IDENTITY:?Set a Developer ID Application signing identity}"
-: "${RAVEL_VERSION:?Set the release version, for example 0.4.0}"
+: "${RAVEL_VERSION:?Set the release version, for example 0.5.0}"
 case "$RAVEL_VERSION" in
     *[!0-9.]*|'') echo "RAVEL_VERSION must contain only digits and dots" >&2; exit 1 ;;
 esac
