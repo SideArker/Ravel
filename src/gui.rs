@@ -593,7 +593,6 @@ impl App {
                 .inner_margin(8.)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Pairing PIN:");
                         ui.label(
                             RichText::new(value.as_str())
                                 .monospace()
@@ -602,7 +601,7 @@ impl App {
                                 .color(Color32::from_rgb(120, 220, 150)),
                         );
                         ui.weak(format!(
-                            "Expires in {}s · enter this PIN on the other device",
+                            "{}s",
                             deadline.saturating_duration_since(Instant::now()).as_secs()
                         ));
                     });
@@ -705,9 +704,7 @@ impl App {
 
         ui.add_space(6.);
         if self.trusted.is_empty() && self.peers.is_empty() {
-            ui.weak(
-                "No devices found on the LAN yet. Open Ravel on another device or enter its IP:port below.",
-            );
+            ui.weak("No devices found");
         }
 
         for (fp, peer) in self.trusted.clone() {
@@ -742,8 +739,8 @@ impl App {
 
                 if let Some(c) = &conn {
                     let badge = match c.controller {
-                        Direction::Sending => "Connected · controlling",
-                        Direction::Receiving => "Connected · controlling this device",
+                        Direction::Sending => "Controlling",
+                        Direction::Receiving => "Controlled",
                         Direction::Local => "Connected",
                     };
                     ui.colored_label(Color32::from_rgb(100, 200, 130), badge);
@@ -757,9 +754,9 @@ impl App {
                         },
                     );
                 } else if let Some(addr) = &discovered_addr {
-                    ui.weak(format!("Paired · nearby ({addr})"));
+                    ui.weak(format!("Nearby · {addr}"));
                 } else {
-                    ui.weak("Paired · offline");
+                    ui.weak("Offline");
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -913,7 +910,6 @@ impl App {
         });
 
         if self.trusted.is_empty() {
-            ui.weak("Pair a device above to arrange screens and configure the handoff edge.");
             return;
         }
 
@@ -942,10 +938,7 @@ impl App {
             .unwrap_or_else(|| "Device".into());
 
         ui.horizontal(|ui| {
-            ui.weak(format!(
-                "Drag {active_name} around {} to align the handoff edge, or snap:",
-                self.name
-            ));
+            ui.weak(format!("Drag {active_name}:"));
             for (side, label) in [
                 (Side::Left, "Left"),
                 (Side::Right, "Right"),
@@ -1044,6 +1037,7 @@ impl App {
             }
 
             let mut preview_layout = peer_layout;
+            let mut live_center = drag_center;
             if response.dragged()
                 && let Some((drag_fp, pos)) = self.dragging.as_mut()
                 && drag_fp == fp
@@ -1057,6 +1051,7 @@ impl App {
                     canvas_rect.top() + peer_size.y * 0.5 + 4.,
                     canvas_rect.bottom() - peer_size.y * 0.5 - 4.,
                 );
+                live_center = Some(*pos);
                 preview_layout = snap_layout_from_drag(local_rect, peer_size, *pos);
                 self.layout = preview_layout;
             }
@@ -1067,6 +1062,8 @@ impl App {
             {
                 let final_layout = snap_layout_from_drag(local_rect, peer_size, pos);
                 self.layout = final_layout;
+                preview_layout = final_layout;
+                live_center = None;
                 updated_layout = Some((fp.clone(), final_layout));
             }
 
@@ -1078,7 +1075,7 @@ impl App {
                 });
             }
 
-            let draw_rect = if drag_center.is_some() {
+            let draw_rect = if let Some(center) = live_center {
                 let ghost_center = peer_box_center(local_rect, peer_size, preview_layout);
                 let ghost_rect = Rect::from_center_size(ghost_center, peer_size);
                 painter.rect_stroke(
@@ -1087,7 +1084,12 @@ impl App {
                     Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(110, 220, 150, 140)),
                     egui::StrokeKind::Inside,
                 );
-                Rect::from_center_size(self.dragging.as_ref().unwrap().1, peer_size)
+                Rect::from_center_size(center, peer_size)
+            } else if drag_center.is_some() {
+                Rect::from_center_size(
+                    peer_box_center(local_rect, peer_size, preview_layout),
+                    peer_size,
+                )
             } else {
                 peer_rect
             };
@@ -1248,27 +1250,6 @@ impl App {
                     self.command(Command::SetHideTray(self.hide_tray));
                 }
             });
-
-            ui.horizontal(|ui| {
-                ui.label(format!("Input: {}", self.backend));
-                if ui.small_button("Recheck").clicked() {
-                    self.user_interacted = true;
-                    self.command(Command::Probe);
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(format!("TCP port {}", self.port));
-                ui.weak("·");
-                ui.label("Fingerprint:");
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(pretty_fingerprint(&self.worker.identity.fingerprint))
-                            .monospace()
-                            .size(11.),
-                    )
-                    .selectable(true),
-                );
-            });
         });
     }
 }
@@ -1385,7 +1366,6 @@ impl eframe::App for App {
                         Color32::from_rgb(100, 220, 135),
                         RichText::new(format!("Controlling {peer_name}")).strong(),
                     );
-                    ui.weak("· Ctrl+Alt+Shift+Esc returns/stops");
                 } else if let Some(peer_name) = receiving_from {
                     ui.colored_label(
                         Color32::from_rgb(230, 180, 90),
@@ -1411,13 +1391,11 @@ impl eframe::App for App {
                         Color32::from_rgb(100, 200, 130),
                         RichText::new("Ready to connect").strong(),
                     );
-                    ui.weak(&self.status);
                 } else {
                     ui.colored_label(
                         Color32::from_rgb(230, 180, 90),
                         RichText::new("Sharing is off").strong(),
                     );
-                    ui.weak(&self.status);
                 }
             });
 
@@ -1731,5 +1709,74 @@ fn truncate_label(text: &str, max_chars: usize) -> String {
         let mut s: String = text.chars().take(max_chars.saturating_sub(1)).collect();
         s.push('…');
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local() -> Rect {
+        Rect::from_center_size(Pos2::new(200., 100.), egui::vec2(100., 60.))
+    }
+
+    #[test]
+    fn dragging_to_each_edge_selects_that_side() {
+        let peer = egui::vec2(100., 60.);
+        for (side, offset) in [
+            (Side::Left, egui::vec2(-120., 0.)),
+            (Side::Right, egui::vec2(120., 0.)),
+            (Side::Top, egui::vec2(0., -80.)),
+            (Side::Bottom, egui::vec2(0., 80.)),
+        ] {
+            let layout = snap_layout_from_drag(local(), peer, local().center() + offset);
+            assert_eq!(layout.side, side);
+            assert_eq!(layout.alignment, 0.0);
+        }
+    }
+
+    #[test]
+    fn drag_alignment_is_clamped_and_roundtrips_through_box_position() {
+        let peer = egui::vec2(100., 60.);
+        let far = snap_layout_from_drag(local(), peer, local().center() + egui::vec2(120., 500.));
+        assert!(far.alignment.abs() <= 0.9);
+        let layout = Layout {
+            side: Side::Right,
+            alignment: 0.4,
+        };
+        let center = peer_box_center(local(), peer, layout);
+        let back = snap_layout_from_drag(local(), peer, center);
+        assert_eq!(back.side, Side::Right);
+        assert!((back.alignment - 0.4).abs() < 0.01);
+    }
+
+    #[test]
+    fn labels_are_truncated_on_char_boundaries() {
+        assert_eq!(truncate_label("short", 16), "short");
+        let out = truncate_label("ŻółćŻółćŻółćŻółćŻółć", 8);
+        assert_eq!(out.chars().count(), 8);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn logo_has_transparent_corners_and_opaque_center() {
+        let rgba = logo_rgba(32);
+        assert_eq!(rgba.len(), 32 * 32 * 4);
+        assert_eq!(rgba[3], 0);
+        let mid = (16 * 32 + 16) * 4;
+        assert_eq!(rgba[mid + 3], 255);
+    }
+
+    #[test]
+    fn box_size_follows_aspect_ratio() {
+        let wide = Display {
+            x: 0.,
+            y: 0.,
+            width: 2560.,
+            height: 1080.,
+            scale: 1.,
+        };
+        assert!(box_size(Some(wide)).x > box_size(None).x);
+        assert_eq!(box_size(None), egui::vec2(96., 58.));
     }
 }
