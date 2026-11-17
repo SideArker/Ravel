@@ -18,15 +18,16 @@ binary targets are currently Linux x86_64 and Windows x64.
 
 The macOS input code and a Developer ID packaging script are present. An
 unsigned native release build passed CI, but no signed macOS release artifact
-has been produced or tested. The release workflow
-requires `RAVEL_CERTIFICATE_P12_BASE64`, `RAVEL_CERTIFICATE_PASSWORD` and
-`RAVEL_CODESIGN_IDENTITY` repository secrets; without them its macOS job and
-release publication fail.
+has been produced or tested. The release workflow publishes Linux and Windows
+archives. To include macOS, set the repository variable `RAVEL_MACOS_SIGNED=true`
+and provide the `RAVEL_CERTIFICATE_P12_BASE64`, `RAVEL_CERTIFICATE_PASSWORD` and
+`RAVEL_CODESIGN_IDENTITY` repository secrets. A macOS packaging failure then
+blocks publication.
 On a Mac with Xcode Command Line Tools, Rust 1.99 or newer, and a Developer ID
 Application certificate installed in the keychain:
 
 ```sh
-export RAVEL_VERSION=0.3.0
+export RAVEL_VERSION=0.4.0
 export RAVEL_CODESIGN_IDENTITY='Developer ID Application: Example (TEAMID)'
 sh package/macos.sh
 ```
