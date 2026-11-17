@@ -109,6 +109,7 @@ fn run() -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_app_id("ravel")
             .with_icon(ravel::gui::window_icon())
+            .with_transparent(true)
             .with_inner_size([760., 680.])
             .with_min_inner_size([640., 560.]),
         ..Default::default()
