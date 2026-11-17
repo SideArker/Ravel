@@ -48,7 +48,6 @@ pub enum Command {
     },
     SetName(String),
     SetHideTray(bool),
-    SetShatter(bool),
     MarkAutostartPrompted,
     TakeControl,
 }
@@ -58,7 +57,6 @@ pub enum Event {
     Preferences {
         hide_tray: bool,
         autostart_prompted: bool,
-        shatter: bool,
     },
     Status(String),
     Backend(String),
@@ -274,7 +272,6 @@ async fn work(
     let initial_enabled = auto_connect.is_some() || has_trusted;
     let initial_hide_tray = store.hide_tray();
     let initial_autostart_prompted = store.autostart_prompted();
-    let initial_shatter = store.shatter();
     let (hub_tx, hub_rx) = mpsc::channel(64);
     let ctx = Rc::new(Context {
         identity,
@@ -298,7 +295,6 @@ async fn work(
     ctx.send_event(Event::Preferences {
         hide_tray: initial_hide_tray,
         autostart_prompted: initial_autostart_prompted,
-        shatter: initial_shatter,
     });
     ctx.send_event(Event::SelectedMonitor(
         ctx.store.borrow().monitor().map(str::to_owned),
@@ -488,17 +484,7 @@ async fn work(
                         let result = ctx.store.borrow_mut().set_hide_tray(hide);
                         if result.is_ok() {
                             let autostart_prompted = ctx.store.borrow().autostart_prompted();
-                            let shatter = ctx.store.borrow().shatter();
-                            ctx.send_event(Event::Preferences { hide_tray: hide, autostart_prompted, shatter });
-                        }
-                        result
-                    },
-                    Command::SetShatter(on)=>{
-                        let result = ctx.store.borrow_mut().set_shatter(on);
-                        if result.is_ok() {
-                            let hide_tray = ctx.store.borrow().hide_tray();
-                            let autostart_prompted = ctx.store.borrow().autostart_prompted();
-                            ctx.send_event(Event::Preferences { hide_tray, autostart_prompted, shatter: on });
+                            ctx.send_event(Event::Preferences { hide_tray: hide, autostart_prompted });
                         }
                         result
                     },
@@ -506,8 +492,7 @@ async fn work(
                         let result = ctx.store.borrow_mut().set_autostart_prompted(true);
                         if result.is_ok() {
                             let hide_tray = ctx.store.borrow().hide_tray();
-                            let shatter = ctx.store.borrow().shatter();
-                            ctx.send_event(Event::Preferences { hide_tray, autostart_prompted: true, shatter });
+                            ctx.send_event(Event::Preferences { hide_tray, autostart_prompted: true });
                         }
                         result
                     },

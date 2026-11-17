@@ -27,8 +27,6 @@ struct Data {
     hide_tray: bool,
     #[serde(default)]
     autostart_prompted: bool,
-    #[serde(default)]
-    shatter: Option<bool>,
 }
 pub struct Store {
     path: PathBuf,
@@ -71,14 +69,6 @@ impl Store {
     pub fn set_hide_tray(&mut self, hide: bool) -> Result<()> {
         let mut next = self.data.clone();
         next.hide_tray = hide;
-        self.save(next)
-    }
-    pub fn shatter(&self) -> bool {
-        self.data.shatter.unwrap_or(true)
-    }
-    pub fn set_shatter(&mut self, on: bool) -> Result<()> {
-        let mut next = self.data.clone();
-        next.shatter = Some(on);
         self.save(next)
     }
     pub fn autostart_prompted(&self) -> bool {

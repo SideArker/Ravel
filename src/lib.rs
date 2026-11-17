@@ -7,7 +7,6 @@ pub mod pairing;
 pub mod protocol;
 pub mod runtime;
 pub mod session;
-pub mod shatter;
 pub mod store;
 pub mod tls;
 pub mod updates;

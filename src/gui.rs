@@ -523,8 +523,6 @@ pub struct App {
     autostart_enabled: bool,
     show_autostart_prompt: bool,
     hide_tray: bool,
-    shatter: bool,
-    shatter_run: Option<(Instant, Layout)>,
     exit_at: Option<Instant>,
     exited: bool,
     quitting: bool,
@@ -579,8 +577,6 @@ impl App {
             autostart_enabled,
             show_autostart_prompt: false,
             hide_tray: false,
-            shatter: true,
-            shatter_run: None,
             exit_at: smoke.then(|| Instant::now() + Duration::from_secs(3)),
             exited: false,
             quitting: false,
@@ -720,85 +716,6 @@ impl App {
         }
         self.selected = Some(fp);
     }
-    /// Start the glass-break overlay at the edge shared with the peer involved in the handoff.
-    fn start_shatter(&mut self, direction: Direction) {
-        let layout = self
-            .connections
-            .values()
-            .find(|c| {
-                if direction == Direction::Local {
-                    c.controller != Direction::Local
-                } else {
-                    c.controller == direction
-                }
-            })
-            .or_else(|| self.connections.values().next())
-            .and_then(|c| self.trusted.get(&c.fingerprint))
-            .map(|p| p.layout)
-            .unwrap_or(self.layout);
-        self.shatter_run = Some((Instant::now(), layout));
-    }
-
-    fn show_shatter(&mut self, ctx: &egui::Context) {
-        let Some((start, layout)) = self.shatter_run else {
-            return;
-        };
-        let t = start.elapsed().as_secs_f32() / crate::shatter::DURATION.as_secs_f32();
-        if t >= 1. {
-            self.shatter_run = None;
-            return;
-        }
-        let monitor_rect = self
-            .selected_monitor
-            .as_deref()
-            .and_then(|id| self.monitors.iter().find(|m| m.id == id))
-            .or_else(|| self.monitors.first())
-            .map(|m| {
-                Rect::from_min_size(
-                    Pos2::new(m.display.x as f32, m.display.y as f32),
-                    Vec2::new(m.display.width as f32, m.display.height as f32),
-                )
-            })
-            .unwrap_or_else(|| Rect::from_min_size(Pos2::ZERO, Vec2::new(1920., 1080.)));
-        let patch = crate::shatter::overlay_rect(monitor_rect, layout.side, layout.alignment);
-        let id = egui::ViewportId::from_hash_of("ravel-shatter");
-        let builder = egui::ViewportBuilder::default()
-            .with_title("Ravel Shatter")
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_always_on_top()
-            .with_mouse_passthrough(true)
-            .with_taskbar(false)
-            .with_active(false)
-            .with_position(patch.min)
-            .with_inner_size(patch.size());
-        ctx.show_viewport_immediate(id, builder, |ctx, _| {
-            let screen = ctx.content_rect();
-            let origin = crate::shatter::origin(screen, layout.side, 0.0);
-            let mut shapes = Vec::new();
-            crate::shatter::paint(&mut shapes, screen, origin, layout.side, t);
-            egui::CentralPanel::default()
-                .frame(egui::Frame::NONE)
-                .show(ctx, |ui| ui.painter().extend(shapes));
-            ctx.request_repaint_after(Duration::from_millis(16));
-        });
-
-        // Also render on the active Ravel window edge so it is visible even on compositors
-        // that restrict secondary click-through overlay positioning.
-        let win_rect = ctx.content_rect();
-        let win_origin = crate::shatter::origin(win_rect, layout.side, layout.alignment);
-        let mut win_shapes = Vec::new();
-        crate::shatter::paint(&mut win_shapes, win_rect, win_origin, layout.side, t);
-        egui::Area::new(egui::Id::new("ravel-shatter-inline"))
-            .order(egui::Order::Foreground)
-            .interactable(false)
-            .fixed_pos(win_rect.min)
-            .show(ctx, |ui| {
-                ui.painter().extend(win_shapes);
-            });
-        ctx.request_repaint_after(Duration::from_millis(16));
-    }
-
     fn peer_address(&self, fp: &str) -> Option<String> {
         self.peers
             .iter()
@@ -820,9 +737,7 @@ impl App {
                 Event::Preferences {
                     hide_tray,
                     autostart_prompted,
-                    shatter,
                 } => {
-                    self.shatter = shatter;
                     self.hide_tray = hide_tray;
                     if hide_tray {
                         self.tray = None;
@@ -928,12 +843,7 @@ impl App {
                     self.exited = true;
                 }
                 Event::Feedback(feedback) => match feedback {
-                    Feedback::Controller(direction) => {
-                        if self.shatter && self.controller.is_some_and(|prev| prev != direction) {
-                            self.start_shatter(direction);
-                        }
-                        self.controller = Some(direction);
-                    }
+                    Feedback::Controller(direction) => self.controller = Some(direction),
                     Feedback::Handoff { progress, incoming } => {
                         self.handoff = Some((progress, incoming, Instant::now()));
                     }
@@ -1396,10 +1306,6 @@ impl App {
                     layout: self.layout,
                 });
             }
-            if ui.small_button("Preview glass break").clicked() {
-                self.user_interacted = true;
-                self.shatter_run = Some((Instant::now(), self.layout));
-            }
         });
 
         self.draw_interactive_layout(ui, &active_fp);
@@ -1580,15 +1486,6 @@ impl App {
             egui::FontId::proportional(13.),
             Color32::WHITE,
         );
-        if let Some((start, layout)) = self.shatter_run {
-            let t = start.elapsed().as_secs_f32() / crate::shatter::DURATION.as_secs_f32();
-            if t < 1.0 {
-                let hit = crate::shatter::origin(local_rect, layout.side, layout.alignment);
-                let mut shapes = Vec::new();
-                crate::shatter::paint(&mut shapes, local_rect, hit, layout.side, t);
-                painter.extend(shapes);
-            }
-        }
 
         if let Some((fp, layout)) = updated_layout {
             self.command(Command::Layout {
@@ -1678,21 +1575,6 @@ impl App {
                     }
                 }
                 ui.separator();
-                let shatter_label = if self.shatter {
-                    "Glass break: on"
-                } else {
-                    "Glass break: off"
-                };
-                if ui.small_button(shatter_label).clicked() {
-                    self.user_interacted = true;
-                    self.shatter = !self.shatter;
-                    self.command(Command::SetShatter(self.shatter));
-                }
-                if ui.small_button("Preview").clicked() {
-                    self.user_interacted = true;
-                    self.shatter_run = Some((Instant::now(), self.layout));
-                }
-                ui.separator();
                 let tray_label = if self.hide_tray {
                     "Show tray icon"
                 } else {
@@ -1713,10 +1595,6 @@ impl App {
     }
 }
 impl eframe::App for App {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
-    }
-
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if !self.repaint_registered {
             let repaint = ctx.clone();
@@ -1741,7 +1619,6 @@ impl eframe::App for App {
             }
         }
         self.update_events(ctx);
-        self.show_shatter(ctx);
         ctx.request_repaint_after(Duration::from_millis(100));
         if self.exited || self.exit_at.is_some_and(|t| Instant::now() >= t) {
             self.quitting = true;
