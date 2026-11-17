@@ -692,7 +692,7 @@ pub fn request_show(directory: &std::path::Path) -> Result<()> {
 
 fn request_control(directory: &std::path::Path, filename: &str) -> Result<()> {
     let lock_path = directory.join("instance.lock");
-    crate::identity::read_private(&lock_path)?;
+    crate::identity::validate_private(&lock_path)?;
     let lock = std::fs::File::open(lock_path)?;
     match lock.try_lock() {
         Ok(()) => bail!("No Ravel instance is running in this state directory"),

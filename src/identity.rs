@@ -77,6 +77,10 @@ pub fn lock_directory(directory: &Path) -> Result<fs::File> {
 }
 
 pub fn read_private(path: &Path) -> Result<Vec<u8>> {
+    validate_private(path)?;
+    Ok(fs::read(path)?)
+}
+pub(crate) fn validate_private(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 65536,
@@ -90,7 +94,7 @@ pub fn read_private(path: &Path) -> Result<Vec<u8>> {
             "State file must be private (chmod 600)"
         );
     }
-    Ok(fs::read(path)?)
+    Ok(())
 }
 pub fn atomic_private(path: &Path, bytes: &[u8], overwrite: bool) -> Result<()> {
     let parent = path.parent().context("State file needs a directory")?;
