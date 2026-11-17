@@ -122,6 +122,21 @@ mod tests {
             assert!(read(&mut frame.as_slice()).await.is_err());
         }
     }
+    #[tokio::test]
+    async fn layout_message_roundtrips_and_version_is_bumped() {
+        use crate::geometry::Side;
+        let layout = Layout {
+            side: Side::Top,
+            alignment: -0.25,
+        };
+        let mut buf = Vec::new();
+        write(&mut buf, &Message::Layout(layout)).await.unwrap();
+        let Message::Layout(read_back) = read(&mut buf.as_slice()).await.unwrap() else {
+            panic!("expected Layout");
+        };
+        assert_eq!(read_back, layout);
+        assert_eq!(VERSION, 4);
+    }
     #[test]
     fn rejects_invalid_input() {
         assert!(Input::Motion { x: f64::NAN, y: 0. }.validate().is_err());

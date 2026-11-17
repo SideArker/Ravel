@@ -641,6 +641,20 @@ mod tests {
         assert!(backend.arm(Some(Side::Right)).await.is_err());
         backend.arm(Some(Side::Left)).await.unwrap();
     }
+    #[tokio::test]
+    async fn multiple_outer_edges_can_be_armed_together_and_deduplicated() {
+        let (mut backend, _, trace) = Backend::test();
+        backend
+            .arm_sides(&[Side::Left, Side::Right, Side::Left])
+            .await
+            .unwrap();
+        assert_eq!(
+            trace.state.borrow().armed_sides,
+            vec![Side::Left, Side::Right]
+        );
+        backend.arm_sides(&[]).await.unwrap();
+        assert!(trace.state.borrow().armed_sides.is_empty());
+    }
     #[test]
     fn releases_keys_and_buttons_and_detects_stop_chord() {
         let mut h = Held::default();

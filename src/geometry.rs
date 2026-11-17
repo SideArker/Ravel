@@ -311,6 +311,38 @@ mod tests {
 }
 
 #[cfg(test)]
+mod side_tests {
+    use super::*;
+    #[test]
+    fn side_handles_roundtrip_and_reject_unknown() {
+        for side in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
+            assert_eq!(Side::from_handle(side.to_handle()), Some(side));
+            assert_eq!(side.opposite().opposite(), side);
+        }
+        assert_eq!(Side::from_handle(9), None);
+    }
+    #[test]
+    fn layout_rejects_out_of_range_alignment() {
+        assert!(
+            Layout {
+                side: Side::Left,
+                alignment: 0.95
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Layout {
+                side: Side::Left,
+                alignment: f64::NAN
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
 mod overlap_tests {
     use super::*;
     #[test]

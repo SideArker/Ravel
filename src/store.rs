@@ -204,4 +204,17 @@ mod tests {
         s.revoke(&fp).unwrap();
         assert!(!Store::load(dir.path()).unwrap().trusted(&fp));
     }
+
+    #[test]
+    fn preferences_default_off_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::load(dir.path()).unwrap();
+        assert!(!s.hide_tray());
+        assert!(!s.autostart_prompted());
+        s.set_hide_tray(true).unwrap();
+        s.set_autostart_prompted(true).unwrap();
+        let s = Store::load(dir.path()).unwrap();
+        assert!(s.hide_tray());
+        assert!(s.autostart_prompted());
+    }
 }
