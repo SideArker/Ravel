@@ -662,3 +662,198 @@ async fn leave_releases_inputs_and_restores_local_capture() {
         })
         .await;
 }
+
+#[tokio::test]
+async fn hub_supports_multiple_peers_and_live_layout_updates() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = Store::load(directory.path()).unwrap();
+            let fp_a = "aa".repeat(32);
+            let fp_b = "bb".repeat(32);
+            store.trust(fp_a.clone(), "Peer A".into()).unwrap();
+            store.trust(fp_b.clone(), "Peer B".into()).unwrap();
+            store
+                .set_layout(
+                    &fp_a,
+                    Layout {
+                        side: Side::Left,
+                        alignment: 0.0,
+                    },
+                )
+                .unwrap();
+            store
+                .set_layout(
+                    &fp_b,
+                    Layout {
+                        side: Side::Right,
+                        alignment: 0.0,
+                    },
+                )
+                .unwrap();
+
+            let store = Rc::new(RefCell::new(store));
+            let (stop, stop_rx) = watch::channel(0);
+            let (_take_tx, take_rx) = watch::channel(0);
+            let (status_tx, _status_rx) = mpsc::channel(32);
+            let (feedback_tx, _feedback_rx) = mpsc::channel(32);
+            let (conns_tx, mut conns_rx) = mpsc::channel(32);
+            let (monitors_tx, _monitors_rx) = mpsc::channel(16);
+            let (trusted_tx, _trusted_rx) = mpsc::channel(16);
+            let (cmd_tx, cmd_rx) = mpsc::channel(32);
+            let (backend, capture, trace) = Backend::test();
+
+            let hub_task = tokio::task::spawn_local(run_hub_with_backend(
+                cmd_rx,
+                HubSignals {
+                    stop: stop_rx,
+                    stop_request: stop.clone(),
+                    take_control: take_rx,
+                    store: store.clone(),
+                    status: status_tx,
+                    feedback: feedback_tx,
+                    connections: conns_tx,
+                    monitors: monitors_tx,
+                    trusted_changed: trusted_tx,
+                },
+                backend,
+            ));
+
+            let (local_a, mut peer_a) = tokio::io::duplex(65536);
+            let (local_b, mut peer_b) = tokio::io::duplex(65536);
+
+            cmd_tx
+                .send(HubCommand::Attach {
+                    stream: Box::new(local_a),
+                    fingerprint: fp_a.clone(),
+                    initiator: true,
+                })
+                .await
+                .unwrap();
+            let Message::Ready {
+                display,
+                desktop,
+                layout,
+            } = protocol::read(&mut peer_a).await.unwrap()
+            else {
+                panic!("Expected Ready from A");
+            };
+            protocol::write(
+                &mut peer_a,
+                &Message::Ready {
+                    display,
+                    desktop,
+                    layout: layout.reciprocal(),
+                },
+            )
+            .await
+            .unwrap();
+
+            cmd_tx
+                .send(HubCommand::Attach {
+                    stream: Box::new(local_b),
+                    fingerprint: fp_b.clone(),
+                    initiator: true,
+                })
+                .await
+                .unwrap();
+            let Message::Ready {
+                display,
+                desktop,
+                layout,
+            } = protocol::read(&mut peer_b).await.unwrap()
+            else {
+                panic!("Expected Ready from B");
+            };
+            protocol::write(
+                &mut peer_b,
+                &Message::Ready {
+                    display,
+                    desktop,
+                    layout: layout.reciprocal(),
+                },
+            )
+            .await
+            .unwrap();
+
+            trace
+                .wait_for(|s| {
+                    s.armed_sides.contains(&Side::Left) && s.armed_sides.contains(&Side::Right)
+                })
+                .await;
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while let Some(conns) = conns_rx.recv().await {
+                    if conns.len() == 2 {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+            let read_non_ping = async |peer: &mut DuplexStream| loop {
+                let m = protocol::read(peer).await.unwrap();
+                if !matches!(m, Message::Ping) {
+                    return m;
+                }
+            };
+
+            cmd_tx
+                .send(HubCommand::UpdateLayout {
+                    fingerprint: fp_b.clone(),
+                    layout: Layout {
+                        side: Side::Top,
+                        alignment: 0.25,
+                    },
+                })
+                .await
+                .unwrap();
+            let msg = read_non_ping(&mut peer_b).await;
+            assert!(matches!(
+                msg,
+                Message::Layout(Layout {
+                    side: Side::Bottom,
+                    alignment,
+                }) if (alignment + 0.25).abs() < 1e-6
+            ));
+            trace
+                .wait_for(|s| {
+                    s.armed_sides.contains(&Side::Left) && s.armed_sides.contains(&Side::Top)
+                })
+                .await;
+
+            capture
+                .send(CaptureEvent::Begin { point: [0., 400.] })
+                .await
+                .unwrap();
+            capture
+                .send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
+                    time: 0,
+                    dx: -50.,
+                    dy: 0.,
+                })))
+                .await
+                .unwrap();
+            assert!(matches!(
+                read_non_ping(&mut peer_a).await,
+                Message::Enter(_)
+            ));
+
+            cmd_tx.send(HubCommand::Disconnect(fp_a)).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while let Some(conns) = conns_rx.recv().await {
+                    if conns.len() == 1 && conns[0].fingerprint == fp_b {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+            drop(cmd_tx);
+            stop.send_modify(|e| *e += 1);
+            hub_task.await.unwrap().unwrap();
+        })
+        .await;
+}

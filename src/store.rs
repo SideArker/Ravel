@@ -23,6 +23,10 @@ struct Data {
     monitor: Option<String>,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    hide_tray: bool,
+    #[serde(default)]
+    autostart_prompted: bool,
 }
 pub struct Store {
     path: PathBuf,
@@ -58,6 +62,22 @@ impl Store {
     }
     pub fn name(&self) -> Option<&str> {
         self.data.name.as_deref()
+    }
+    pub fn hide_tray(&self) -> bool {
+        self.data.hide_tray
+    }
+    pub fn set_hide_tray(&mut self, hide: bool) -> Result<()> {
+        let mut next = self.data.clone();
+        next.hide_tray = hide;
+        self.save(next)
+    }
+    pub fn autostart_prompted(&self) -> bool {
+        self.data.autostart_prompted
+    }
+    pub fn set_autostart_prompted(&mut self, prompted: bool) -> Result<()> {
+        let mut next = self.data.clone();
+        next.autostart_prompted = prompted;
+        self.save(next)
     }
     pub fn set_name(&mut self, name: String) -> Result<()> {
         validate_name(&name)?;
