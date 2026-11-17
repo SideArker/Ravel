@@ -37,12 +37,16 @@ tar -czf "$tmpdir/release.tar.gz" -C "$tmpdir/package" ravel
 
 run_installer() {
     PATH="$tmpdir/bin:$PATH" RAVEL_INSTALL_DIR="$tmpdir/install" \
+        XDG_DATA_HOME="$tmpdir/data" \
         RAVEL_TEST_ARCHIVE="$tmpdir/release.tar.gz" sh "$root/install.sh"
 }
 
 output=$(run_installer)
 case "$output" in *"Installed Ravel at $tmpdir/install/ravel"*) ;; *) exit 1 ;; esac
 [ "$("$tmpdir/install/ravel")" = 'new release' ]
+[ -f "$tmpdir/data/applications/ravel.desktop" ]
+[ -f "$tmpdir/data/icons/hicolor/scalable/apps/ravel.svg" ]
+grep -q "Exec=\"$tmpdir/install/ravel\"" "$tmpdir/data/applications/ravel.desktop"
 
 printf '#!/bin/sh\nprintf "old release\\n"\n' > "$tmpdir/install/ravel"
 chmod +x "$tmpdir/install/ravel"

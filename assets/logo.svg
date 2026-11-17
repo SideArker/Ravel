@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1e2233"/>
+      <stop offset="100%" stop-color="#121420"/>
+    </linearGradient>
+    <linearGradient id="threadA" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5ee7df"/>
+      <stop offset="100%" stop-color="#6b8cff"/>
+    </linearGradient>
+    <linearGradient id="threadB" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff8a65"/>
+      <stop offset="100%" stop-color="#b465da"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded squircle background -->
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bg)" stroke="#2e3552" stroke-width="3"/>
+
+  <!-- Interwoven cotton threads forming a Reef / Carrick knot -->
+  <!-- Thread A (cool cyan-indigo loop, bottom-left to top-right) -->
+  <path d="M 28 84 C 24 54, 48 30, 74 36 C 96 41, 100 68, 78 82 C 58 95, 42 74, 64 56 L 98 28"
+        fill="none" stroke="url(#threadA)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Thread B (warm coral-violet loop, top-left to bottom-right, weaving over/under Thread A) -->
+  <path d="M 30 30 L 64 58 C 86 76, 70 96, 50 83 C 28 69, 32 42, 54 37 C 80 31, 104 55, 100 85"
+        fill="none" stroke="url(#threadB)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Over-weave bridge so the two threads visibly interlock -->
+  <path d="M 53 66 C 60 60, 68 54, 75 48"
+        fill="none" stroke="#181b28" stroke-width="17" stroke-linecap="round"/>
+  <path d="M 51 68 C 59 61, 69 53, 77 46"
+        fill="none" stroke="url(#threadA)" stroke-width="11" stroke-linecap="round"/>
+
+  <!-- Subtle cotton-ply highlight dashes along the threads -->
+  <path d="M 38 50 C 44 40, 56 35, 68 36"
+        fill="none" stroke="#ffffff" stroke-opacity="0.32" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="4 6"/>
+  <path d="M 90 52 C 94 62, 91 74, 80 81"
+        fill="none" stroke="#ffffff" stroke-opacity="0.32" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="4 6"/>
+</svg>
