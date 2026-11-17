@@ -4,14 +4,14 @@ use crate::{
     identity::Identity,
     pairing::{self, Binding, Offer},
     protocol::{self, Message, VERSION},
-    session::{self, Feedback, Signals},
+    session::{self, Feedback, HubCommand, HubSignals, PeerConnection},
     store::{Store, TrustedPeer, validate_name},
     tls,
 };
 use anyhow::{Result, anyhow, bail, ensure};
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     rc::Rc,
     sync::Arc,
@@ -40,23 +40,32 @@ pub enum Command {
         address: String,
         expected: Option<String>,
     },
+    Disconnect(String),
     Revoke(String),
     Layout {
         fingerprint: String,
         layout: Layout,
     },
     SetName(String),
+    SetHideTray(bool),
+    MarkAutostartPrompted,
     TakeControl,
 }
 pub enum Event {
     Show,
     Name(String),
+    Preferences {
+        hide_tray: bool,
+        autostart_prompted: bool,
+    },
     Status(String),
     Backend(String),
     Monitors(Vec<Monitor>),
     SelectedMonitor(Option<String>),
     Peers(Vec<Peer>),
     Trusted(BTreeMap<String, TrustedPeer>),
+    Connections(Vec<PeerConnection>),
+    Connecting(Vec<String>),
     Pin {
         value: Zeroizing<String>,
         deadline: Instant,
@@ -73,10 +82,13 @@ pub enum Event {
     Feedback(Feedback),
     Exited(Option<String>),
 }
+type RepaintSlot = Arc<std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
+
 pub struct Worker {
     pub commands: mpsc::Sender<Command>,
     pub events: mpsc::Receiver<Event>,
     pub identity: Arc<Identity>,
+    repaint: RepaintSlot,
     _state_lock: std::fs::File,
     stop: watch::Sender<u64>,
     quit: watch::Sender<bool>,
@@ -104,6 +116,8 @@ impl Worker {
         let (tx, events) = mpsc::channel(128);
         let (stop, _) = watch::channel(0);
         let (quit, quit_rx) = watch::channel(false);
+        let repaint: RepaintSlot = Arc::new(std::sync::Mutex::new(None));
+        let repaint_thread = repaint.clone();
         let identity_thread = identity.clone();
         let stop_thread = stop.clone();
         let thread = std::thread::Builder::new()
@@ -124,6 +138,7 @@ impl Worker {
                             store,
                             rx,
                             tx,
+                            repaint_thread,
                             stop_thread,
                             quit_rx,
                             auto_connect,
@@ -146,11 +161,15 @@ impl Worker {
             commands,
             events,
             identity,
+            repaint,
             _state_lock: state_lock,
             stop,
             quit,
             thread: Some(thread),
         })
+    }
+    pub fn set_repaint(&self, callback: impl Fn() + Send + Sync + 'static) {
+        *self.repaint.lock().unwrap() = Some(Box::new(callback));
     }
     pub fn stop(&self) {
         self.stop
@@ -177,27 +196,33 @@ struct Context {
     allowed_peer: Option<String>,
     offer: RefCell<Option<Offer>>,
     events: mpsc::Sender<Event>,
+    repaint: RepaintSlot,
     name: RefCell<String>,
     stop: watch::Sender<u64>,
     take_control: watch::Sender<u64>,
     enabled: Cell<bool>,
-    session: Arc<Semaphore>,
+    hub: mpsc::Sender<HubCommand>,
+    connected: RefCell<BTreeSet<String>>,
     handshakes: Arc<Semaphore>,
 }
 impl Context {
+    fn send_event(&self, event: Event) {
+        let _ = self.events.try_send(event);
+        if let Some(cb) = self.repaint.lock().unwrap().as_ref() {
+            cb();
+        }
+    }
     fn status(&self, message: impl Into<String>) {
-        let _ = self.events.try_send(Event::Status(message.into()));
+        self.send_event(Event::Status(message.into()));
     }
     fn trusted_update(&self) {
-        let _ = self
-            .events
-            .try_send(Event::Trusted(self.store.borrow().peers()));
+        self.send_event(Event::Trusted(self.store.borrow().peers()));
     }
     fn disable(&self) {
         self.enabled.set(false);
         self.offer.borrow_mut().take();
-        let _ = self.events.try_send(Event::Enabled(false));
-        let _ = self.events.try_send(Event::PinClosed);
+        self.send_event(Event::Enabled(false));
+        self.send_event(Event::PinClosed);
     }
 }
 #[derive(Clone)]
@@ -221,6 +246,14 @@ impl Target {
     }
 }
 
+fn emit_connecting(ctx: &Context, desired: &BTreeMap<String, Target>) {
+    let list: Vec<String> = desired
+        .iter()
+        .map(|(k, t)| t.expected().unwrap_or_else(|| k.clone()))
+        .collect();
+    ctx.send_event(Event::Connecting(list));
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn work(
     directory: PathBuf,
@@ -230,38 +263,46 @@ async fn work(
     store: Store,
     mut commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<Event>,
+    repaint: RepaintSlot,
     stop: watch::Sender<u64>,
     mut quit: watch::Receiver<bool>,
     auto_connect: Option<String>,
 ) -> Result<()> {
+    let has_trusted = !store.peers().is_empty();
+    let initial_enabled = auto_connect.is_some() || has_trusted;
+    let initial_hide_tray = store.hide_tray();
+    let initial_autostart_prompted = store.autostart_prompted();
+    let (hub_tx, hub_rx) = mpsc::channel(64);
     let ctx = Rc::new(Context {
         identity,
         store: Rc::new(RefCell::new(store)),
         allowed_peer: auto_connect.clone(),
         offer: RefCell::new(None),
         events,
+        repaint,
         name: RefCell::new(name),
         stop,
         take_control: watch::channel(0).0,
-        enabled: Cell::new(auto_connect.is_some()),
-        session: Arc::new(Semaphore::new(1)),
-        handshakes: Arc::new(Semaphore::new(4)),
+        enabled: Cell::new(initial_enabled),
+        hub: hub_tx,
+        connected: RefCell::new(BTreeSet::new()),
+        handshakes: Arc::new(Semaphore::new(8)),
     });
     let listener = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
     let port = listener.local_addr()?.port();
     let server = tls::server(&ctx.identity)?;
     ctx.trusted_update();
-    let _ = ctx.events.try_send(Event::SelectedMonitor(
+    ctx.send_event(Event::Preferences {
+        hide_tray: initial_hide_tray,
+        autostart_prompted: initial_autostart_prompted,
+    });
+    ctx.send_event(Event::SelectedMonitor(
         ctx.store.borrow().monitor().map(str::to_owned),
     ));
-    let _ = ctx.events.try_send(Event::Listening(port));
-    if let Some(fp) = &auto_connect {
-        let _ = ctx.events.try_send(Event::Enabled(true));
-        if ctx.identity.fingerprint.as_str() < fp.as_str() {
-            ctx.status("Waiting for the paired device on the LAN");
-        } else {
-            ctx.status("Ready for the paired device to connect");
-        }
+    ctx.send_event(Event::Listening(port));
+    if initial_enabled {
+        ctx.send_event(Event::Enabled(true));
+        ctx.status("Ready for paired devices on the LAN");
     } else {
         ctx.status("Sharing stopped. Pair devices, then allow sharing on the receiving device.");
     }
@@ -285,13 +326,73 @@ async fn work(
         )),
     }
     let mut tasks = JoinSet::new();
-    let mut peers: Vec<Peer> = vec![];
-    // The lower fingerprint initiates so two auto-connect peers cannot race for both session slots.
-    let mut desired = auto_connect.and_then(|fp| {
-        (ctx.identity.fingerprint.as_str() < fp.as_str())
-            .then(|| Target::new(String::new(), Some(fp)))
+    let (status_tx, mut status_rx) = mpsc::channel(32);
+    let (feedback_tx, mut feedback_rx) = mpsc::channel(64);
+    let (conns_tx, mut conns_rx) = mpsc::channel::<Vec<PeerConnection>>(32);
+    let (monitors_tx, mut monitors_rx) = mpsc::channel::<(Vec<Monitor>, String)>(16);
+    let (trusted_tx, mut trusted_rx) = mpsc::channel(16);
+    let ctx_forward = ctx.clone();
+    tasks.spawn_local(async move {
+        loop {
+            tokio::select! {
+                Some(status) = status_rx.recv() => {
+                    ctx_forward.send_event(Event::Status(status));
+                }
+                Some(feedback) = feedback_rx.recv() => {
+                    ctx_forward.send_event(Event::Feedback(feedback));
+                }
+                Some(conns) = conns_rx.recv() => {
+                    *ctx_forward.connected.borrow_mut() = conns.iter().map(|c| c.fingerprint.clone()).collect();
+                    ctx_forward.send_event(Event::Connections(conns));
+                }
+                Some((monitors, backend)) = monitors_rx.recv() => {
+                    if !monitors.is_empty() {
+                        ctx_forward.send_event(Event::Monitors(monitors));
+                    }
+                    ctx_forward.send_event(Event::Backend(backend));
+                }
+                Some(()) = trusted_rx.recv() => {
+                    ctx_forward.trusted_update();
+                }
+                else => break,
+            }
+        }
     });
-    let outbound = Rc::new(Cell::new(false));
+    let hub_signals = HubSignals {
+        stop: ctx.stop.subscribe(),
+        stop_request: ctx.stop.clone(),
+        take_control: ctx.take_control.subscribe(),
+        store: ctx.store.clone(),
+        status: status_tx,
+        feedback: feedback_tx,
+        connections: conns_tx,
+        monitors: monitors_tx,
+        trusted_changed: trusted_tx,
+    };
+    let ctx_hub = ctx.clone();
+    tasks.spawn_local(async move {
+        if let Err(e) = session::run_hub(hub_rx, hub_signals).await {
+            ctx_hub.status(format!("Control hub stopped: {e}"));
+        }
+    });
+
+    let mut peers: Vec<Peer> = vec![];
+    // The lower fingerprint initiates so two auto-connect peers cannot race for duplicate sockets.
+    let mut desired: BTreeMap<String, Target> = BTreeMap::new();
+    if let Some(fp) = auto_connect {
+        if ctx.identity.fingerprint.as_str() < fp.as_str() {
+            desired.insert(fp.clone(), Target::new(String::new(), Some(fp)));
+        }
+    } else {
+        for fp in ctx.store.borrow().peers().into_keys() {
+            if ctx.identity.fingerprint.as_str() < fp.as_str() {
+                desired.insert(fp.clone(), Target::new(String::new(), Some(fp)));
+            }
+        }
+    }
+    emit_connecting(&ctx, &desired);
+    let pairing_outbound = Rc::new(Cell::new(false));
+    let dialing: Rc<RefCell<BTreeSet<String>>> = Rc::new(RefCell::new(BTreeSet::new()));
     let mut stopped = ctx.stop.subscribe();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut reconnect = tokio::time::interval(Duration::from_secs(3));
@@ -299,24 +400,73 @@ async fn work(
         tokio::select! {
             biased;
             _=quit.changed()=>break,
-            _=stopped.changed()=>{ctx.disable();ctx.status("Sharing stopped — all control connections released");},
+            _=stopped.changed()=>{
+                desired.clear();
+                emit_connecting(&ctx, &desired);
+                ctx.disable();
+                ctx.status("Sharing stopped — all control connections released");
+            },
             Some(result)=tasks.join_next()=>{if let Err(e)=result{ctx.status(format!("Connection task failed: {e}"));}},
             Some(command)=commands.recv()=>{
                 let result:Result<()>=match command {
-                    Command::OfferPin=>{let offer=Offer::new(Instant::now());let _=ctx.events.try_send(Event::Pin{value:Zeroizing::new(offer.display_pin()),deadline:offer.deadline});*ctx.offer.borrow_mut()=Some(offer);Ok(())},
-                    Command::CancelPin=>{ctx.offer.borrow_mut().take();let _=ctx.events.try_send(Event::PinClosed);Ok(())},
-                    Command::Enable=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));reconnect.reset_immediately();ctx.status("Sharing allowed for trusted devices");Ok(())},
-                    Command::Probe=>{let events=ctx.events.clone();tasks.spawn_local(async move{let message=match crate::input::Backend::new().await{Ok(mut b)=>{let _=events.try_send(Event::Monitors(b.monitors.clone()));let text=format!("{} — {} active monitor(s); constructor check only",b.label,b.monitors.len());match b.close().await{Ok(())=>text,Err(e)=>format!("Backend cleanup failed: {e}")}},Err(e)=>format!("Backend unavailable: {e:#}")};let _=events.try_send(Event::Backend(message));});Ok(())},
-                    Command::Monitor(id)=>{let result=ctx.store.borrow_mut().set_monitor(id.clone());if result.is_ok(){let _=ctx.events.try_send(Event::SelectedMonitor(Some(id)));ctx.status("Handoff monitor saved for the next connection");}result},
-                    Command::Pair{address,pin,expected}=>{let context=ctx.clone();let flag=outbound.clone();if flag.replace(true){Err(anyhow!("An outgoing connection is already in progress"))}else{tasks.spawn_local(async move{let result=outgoing(context.clone(),Target::new(address,expected),Some(pin)).await;flag.set(false);if let Err(e)=result{context.status(format!("Pairing failed: {e}"));}});Ok(())}},
-                    Command::Connect{address,expected}=>{ctx.enabled.set(true);let _=ctx.events.try_send(Event::Enabled(true));desired=Some(Target::new(address,expected));reconnect.reset_immediately();Ok(())},
-                    Command::Revoke(fp)=>{ctx.stop.send_modify(|e|*e=e.wrapping_add(1));let result=ctx.store.borrow_mut().revoke(&fp);ctx.trusted_update();result},
-                    Command::Layout{fingerprint,layout}=>{let result=ctx.store.borrow_mut().set_layout(&fingerprint,layout);ctx.trusted_update();result},
+                    Command::OfferPin=>{let offer=Offer::new(Instant::now());ctx.send_event(Event::Pin{value:Zeroizing::new(offer.display_pin()),deadline:offer.deadline});*ctx.offer.borrow_mut()=Some(offer);Ok(())},
+                    Command::CancelPin=>{ctx.offer.borrow_mut().take();ctx.send_event(Event::PinClosed);Ok(())},
+                    Command::Enable=>{
+                        ctx.enabled.set(true);
+                        ctx.send_event(Event::Enabled(true));
+                        if desired.is_empty() {
+                            for fp in ctx.store.borrow().peers().into_keys() {
+                                if ctx.identity.fingerprint.as_str() < fp.as_str() {
+                                    desired.insert(fp.clone(), Target::new(String::new(), Some(fp)));
+                                }
+                            }
+                            emit_connecting(&ctx, &desired);
+                        }
+                        reconnect.reset_immediately();
+                        ctx.status("Sharing allowed for trusted devices");
+                        Ok(())
+                    },
+                    Command::Probe=>{let _=ctx.hub.try_send(HubCommand::Probe);Ok(())},
+                    Command::Monitor(id)=>{let result=ctx.store.borrow_mut().set_monitor(id.clone());if result.is_ok(){ctx.send_event(Event::SelectedMonitor(Some(id)));ctx.status("Handoff monitor saved for the next connection");}result},
+                    Command::Pair{address,pin,expected}=>{let context=ctx.clone();let flag=pairing_outbound.clone();if flag.replace(true){Err(anyhow!("A pairing attempt is already in progress"))}else{tasks.spawn_local(async move{let result=outgoing(context.clone(),Target::new(address,expected),Some(pin)).await;flag.set(false);if let Err(e)=result{context.status(format!("Pairing failed: {e}"));}});Ok(())}},
+                    Command::Connect{address,expected}=>{
+                        ctx.enabled.set(true);
+                        ctx.send_event(Event::Enabled(true));
+                        let key = expected.clone().unwrap_or_else(|| address.clone());
+                        desired.insert(key, Target::new(address, expected));
+                        emit_connecting(&ctx, &desired);
+                        reconnect.reset_immediately();
+                        Ok(())
+                    },
+                    Command::Disconnect(fp)=>{
+                        desired.remove(&fp);
+                        desired.retain(|_, t| t.expected().as_deref() != Some(fp.as_str()));
+                        emit_connecting(&ctx, &desired);
+                        let _ = ctx.hub.try_send(HubCommand::Disconnect(fp));
+                        Ok(())
+                    },
+                    Command::Revoke(fp)=>{
+                        desired.remove(&fp);
+                        desired.retain(|_, t| t.expected().as_deref() != Some(fp.as_str()));
+                        emit_connecting(&ctx, &desired);
+                        let _ = ctx.hub.try_send(HubCommand::Disconnect(fp.clone()));
+                        let result=ctx.store.borrow_mut().revoke(&fp);
+                        ctx.trusted_update();
+                        result
+                    },
+                    Command::Layout{fingerprint,layout}=>{
+                        let result=ctx.store.borrow_mut().set_layout(&fingerprint,layout);
+                        if result.is_ok() {
+                            ctx.trusted_update();
+                            let _ = ctx.hub.try_send(HubCommand::UpdateLayout { fingerprint, layout });
+                        }
+                        result
+                    },
                     Command::SetName(name)=>{
                         let result=ctx.store.borrow_mut().set_name(name.clone());
                         if result.is_ok(){
                             *ctx.name.borrow_mut()=name.clone();
-                            let _=ctx.events.try_send(Event::Name(name.clone()));
+                            ctx.send_event(Event::Name(name.clone()));
                             if let Some(task)=discovery_task.take(){task.abort();let _=task.await;}
                             match Discovery::new(&name,&ctx.identity.fingerprint,port){
                                 Ok(discovery)=>{
@@ -330,10 +480,26 @@ async fn work(
                         }
                         result
                     },
+                    Command::SetHideTray(hide)=>{
+                        let result = ctx.store.borrow_mut().set_hide_tray(hide);
+                        if result.is_ok() {
+                            let autostart_prompted = ctx.store.borrow().autostart_prompted();
+                            ctx.send_event(Event::Preferences { hide_tray: hide, autostart_prompted });
+                        }
+                        result
+                    },
+                    Command::MarkAutostartPrompted=>{
+                        let result = ctx.store.borrow_mut().set_autostart_prompted(true);
+                        if result.is_ok() {
+                            let hide_tray = ctx.store.borrow().hide_tray();
+                            ctx.send_event(Event::Preferences { hide_tray, autostart_prompted: true });
+                        }
+                        result
+                    },
                     Command::TakeControl=>{ctx.take_control.send_modify(|epoch|*epoch=epoch.wrapping_add(1));Ok(())},
                 };if let Err(e)=result{ctx.status(e.to_string());}
             },
-            Some(found)=discovery_rx.recv()=>{peers=found;let _=ctx.events.try_send(Event::Peers(peers.clone()));},
+            Some(found)=discovery_rx.recv()=>{peers=found;ctx.send_event(Event::Peers(peers.clone()));},
             accepted=listener.accept()=>{
                 let (stream,address)=accepted?;
                 // Reject public-interface sockets even if the source address is private.
@@ -345,30 +511,70 @@ async fn work(
             _=tick.tick()=>{
                 if directory.join("show.request").try_exists()? {
                     std::fs::remove_file(directory.join("show.request"))?;
-                    let _ = ctx.events.try_send(Event::Show);
+                    ctx.send_event(Event::Show);
                 }
                 if directory.join("shutdown.request").try_exists()? {
                     std::fs::remove_file(directory.join("shutdown.request"))?;
                     break;
                 }
                 if directory.join("stop.request").try_exists()?{let _=std::fs::remove_file(directory.join("stop.request"));ctx.stop.send_modify(|e|*e=e.wrapping_add(1));}
-                if ctx.offer.borrow().as_ref().is_some_and(|o|Instant::now()>=o.deadline){ctx.offer.borrow_mut().take();let _=ctx.events.try_send(Event::PinClosed);}
+                if ctx.offer.borrow().as_ref().is_some_and(|o|Instant::now()>=o.deadline){ctx.offer.borrow_mut().take();ctx.send_event(Event::PinClosed);}
             },
             _=reconnect.tick()=>{
-                if ctx.enabled.get() && ctx.session.available_permits()>0 && !outbound.get() && let Some(mut target)=desired.clone(){
-                        target.expected=target.expected();
-                        if let Some(fp)=&target.expected {
-                            if !ctx.store.borrow().trusted(fp){desired=None;continue;}
-                            if let Some(peer)=peers.iter().find(|p|&p.fingerprint==fp) && let Some(address)=peer.addresses.first(){target.address=address.to_string();}
+                if !ctx.enabled.get() {
+                    continue;
+                }
+                let keys: Vec<String> = desired.keys().cloned().collect();
+                let mut changed = false;
+                for key in keys {
+                    let Some(mut target) = desired.get(&key).cloned() else {
+                        continue;
+                    };
+                    target.expected = target.expected();
+                    if let Some(fp) = &target.expected {
+                        if !ctx.store.borrow().trusted(fp) {
+                            desired.remove(&key);
+                            changed = true;
+                            continue;
                         }
-                        if target.address.is_empty() { continue; }
-                        outbound.set(true);let context=ctx.clone();let flag=outbound.clone();tasks.spawn_local(async move{let result=outgoing(context.clone(),target,None).await;flag.set(false);if let Err(e)=result{context.status(format!("Disconnected; retrying while sharing is allowed: {e}"));}});
+                        if ctx.connected.borrow().contains(fp) || dialing.borrow().contains(fp) {
+                            continue;
+                        }
+                        if let Some(peer) = peers.iter().find(|p| &p.fingerprint == fp)
+                            && let Some(address) = peer.addresses.first()
+                        {
+                            target.address = address.to_string();
+                            if let Some(entry) = desired.get_mut(&key) {
+                                entry.address = target.address.clone();
+                            }
+                        }
+                    } else if dialing.borrow().contains(&key) {
+                        continue;
+                    }
+                    if target.address.is_empty() {
+                        continue;
+                    }
+                    let dial_key = target.expected.clone().unwrap_or_else(|| key.clone());
+                    dialing.borrow_mut().insert(dial_key.clone());
+                    let context = ctx.clone();
+                    let active_dialing = dialing.clone();
+                    tasks.spawn_local(async move {
+                        let result = outgoing(context.clone(), target, None).await;
+                        active_dialing.borrow_mut().remove(&dial_key);
+                        if let Err(e) = result {
+                            context.status(format!("Disconnected; retrying while sharing is allowed: {e}"));
+                        }
+                    });
+                }
+                if changed {
+                    emit_connecting(&ctx, &desired);
                 }
             }
         }
     }
     ctx.disable();
     ctx.stop.send_modify(|e| *e = e.wrapping_add(1));
+    let _ = ctx.hub.try_send(HubCommand::Shutdown);
     if let Some(task) = discovery_task {
         task.abort();
     }
@@ -409,7 +615,7 @@ async fn outgoing(ctx: Rc<Context>, target: Target, pin: Option<Zeroizing<String
     let result = tokio::select! {_=stop.changed()=>return Ok(()),r=tokio::time::timeout(Duration::from_secs(if pairing{310}else{15}),auth)=>r??};
     if let Some((stream, fp)) = result {
         *target.learned.borrow_mut() = Some(fp.clone());
-        control(ctx, stream, fp, true, stop).await?;
+        control(&ctx, stream, fp, true)?;
     }
     Ok(())
 }
@@ -430,7 +636,7 @@ async fn incoming(
     };
     let result = tokio::select! {_=stop.changed()=>return Ok(()),r=tokio::time::timeout(Duration::from_secs(310),auth)=>r??};
     if let Some((stream, fp)) = result {
-        control(ctx, stream, fp, false, stop).await?;
+        control(&ctx, stream, fp, false)?;
     }
     Ok(())
 }
@@ -577,7 +783,7 @@ async fn authorize(
             .finish(lease.generation, success, Instant::now());
         finished?;
         result??;
-        let _ = ctx.events.try_send(Event::PinClosed);
+        ctx.send_event(Event::PinClosed);
         (lease.deadline, Some(lease.generation))
     };
     let (reply, approval) = oneshot::channel();
@@ -590,6 +796,9 @@ async fn authorize(
         })
         .await
         .map_err(|_| anyhow!("GUI closed"))?;
+    if let Some(cb) = ctx.repaint.lock().unwrap().as_ref() {
+        cb();
+    }
     let approved =
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), approval).await??;
     ensure!(
@@ -630,52 +839,15 @@ async fn authorize(
     ctx.status("Device paired. Allow sharing on both devices, then connect.");
     Ok(None)
 }
-async fn control(
-    ctx: Rc<Context>,
-    stream: TlsStream<TcpStream>,
-    fp: String,
-    initiator: bool,
-    stop: watch::Receiver<u64>,
-) -> Result<()> {
+fn control(ctx: &Context, stream: TlsStream<TcpStream>, fp: String, initiator: bool) -> Result<()> {
     ensure!(ctx.enabled.get(), "Sharing stopped");
-    let _permit = ctx
-        .session
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| anyhow!("Another control session is active"))?;
-    let layout = ctx.store.borrow().layout(&fp);
-    let (status_tx, mut status_rx) = mpsc::channel(16);
-    let (feedback_tx, mut feedback_rx) = mpsc::channel(32);
-    let events = ctx.events.clone();
-    let forwarder = tokio::task::spawn_local(async move {
-        loop {
-            tokio::select! {
-                Some(status) = status_rx.recv() => { let _ = events.try_send(Event::Status(status)); },
-                Some(feedback) = feedback_rx.recv() => { let _ = events.try_send(Event::Feedback(feedback)); },
-                else => break,
-            }
-        }
-    });
-    let result = session::run(
-        stream,
-        layout,
-        initiator,
-        Signals {
-            stop,
-            stop_request: ctx.stop.clone(),
-            store: ctx.store.clone(),
+    ctx.hub
+        .try_send(HubCommand::Attach {
+            stream: Box::new(stream),
             fingerprint: fp,
-            status: status_tx,
-            feedback: feedback_tx,
-            take_control: ctx.take_control.subscribe(),
-        },
-    )
-    .await;
-    forwarder.abort();
-    let _ = ctx.events.try_send(Event::Feedback(Feedback::Disconnected));
-    ctx.trusted_update();
-    ctx.status("Disconnected — held input released");
-    result
+            initiator,
+        })
+        .map_err(|_| anyhow!("Control hub busy"))
 }
 
 pub fn request_stop(directory: &std::path::Path) -> Result<()> {
@@ -760,6 +932,7 @@ mod tests {
         let identity = Arc::new(Identity::load_or_create(dir.path()).unwrap());
         let store = Rc::new(RefCell::new(Store::load(dir.path()).unwrap()));
         let (events, receiver) = mpsc::channel(128);
+        let (hub, _) = mpsc::channel(64);
         let (stop, _) = watch::channel(0);
         let ctx = Rc::new(Context {
             identity,
@@ -767,11 +940,13 @@ mod tests {
             allowed_peer: None,
             offer: RefCell::new(None),
             events,
+            repaint: Arc::new(std::sync::Mutex::new(None)),
             name: RefCell::new(name.into()),
             stop,
             take_control: watch::channel(0).0,
             enabled: Cell::new(true),
-            session: Arc::new(Semaphore::new(1)),
+            hub,
+            connected: RefCell::new(BTreeSet::new()),
             handshakes: Arc::new(Semaphore::new(4)),
         });
         (dir, ctx, receiver)
@@ -992,6 +1167,7 @@ mod control_transport_tests {
     use crate::{
         input::{Backend, CaptureEvent},
         protocol::Input,
+        session::Signals,
     };
     use input_event::{Event as InputEvent, KeyboardEvent, PointerEvent};
 

@@ -90,18 +90,25 @@ fn run() -> Result<()> {
         return start_or_show_daemon(&directory);
     }
     let store = ravel::store::Store::load(&directory)?;
-    let name = store.name().map(str::to_owned).or(name).unwrap_or_else(|| {
-        std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("COMPUTERNAME"))
-            .unwrap_or_else(|_| "Ravel device".into())
-    });
-    let peers = store.peers();
-    let auto_connect = (peers.len() == 1).then(|| peers.into_keys().next().unwrap());
-    let worker = Worker::start(directory, name.clone(), port, auto_connect)?;
+    let name = store
+        .name()
+        .map(str::to_owned)
+        .or(name)
+        .unwrap_or_else(default_device_name);
+    let worker = match Worker::start(directory.clone(), name.clone(), port, None) {
+        Ok(worker) => worker,
+        Err(error) => {
+            if runtime::request_show(&directory).is_ok() {
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
     #[allow(unused_mut)] // Linux may select Xwayland for reversible tray hiding.
     let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_app_id("ravel")
+            .with_icon(ravel::gui::window_icon())
             .with_inner_size([760., 680.])
             .with_min_inner_size([640., 560.]),
         ..Default::default()
@@ -167,4 +174,39 @@ fn start_or_show_daemon(directory: &Path) -> Result<()> {
     command.stderr(Stdio::from(log_options.open(directory.join("daemon.log"))?));
     command.spawn()?;
     Ok(())
+}
+
+fn default_device_name() -> String {
+    let raw = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| {
+            #[cfg(unix)]
+            {
+                let mut buf = [0u8; 256];
+                let res = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+                if res == 0 {
+                    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                    if let Ok(s) = std::str::from_utf8(&buf[..len]) {
+                        return Ok(s.to_owned());
+                    }
+                }
+                Err(())
+            }
+            #[cfg(not(unix))]
+            {
+                Err(())
+            }
+        });
+    if let Ok(raw) = raw {
+        let cleaned: String = raw
+            .trim()
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect();
+        if !cleaned.is_empty() {
+            return cleaned;
+        }
+    }
+    "Ravel device".into()
 }
