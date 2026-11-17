@@ -132,6 +132,343 @@ fn tray_icon() -> anyhow::Result<Icon> {
     Ok(Icon::from_rgba(logo_rgba(size), size, size)?)
 }
 
+/// Tokenize numbers and command letters from an SVG `<path d="...">` attribute.
+fn tokenize_svg_path(d: &str) -> Vec<Result<char, f32>> {
+    let mut out = Vec::new();
+    let bytes = d.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c.is_ascii_whitespace() || c == ',' {
+            i += 1;
+        } else if c.is_ascii_alphabetic() && c != 'e' && c != 'E' {
+            out.push(Ok(c));
+            i += 1;
+        } else if c == '-' || c == '+' || c == '.' || c.is_ascii_digit() {
+            let start = i;
+            let mut seen_dot = c == '.';
+            i += 1;
+            if (c == '-' || c == '+') && i < bytes.len() && bytes[i] == b'.' {
+                seen_dot = true;
+                i += 1;
+            }
+            while i < bytes.len() {
+                let b = bytes[i] as char;
+                if b.is_ascii_digit() {
+                    i += 1;
+                } else if b == '.' && !seen_dot {
+                    seen_dot = true;
+                    i += 1;
+                } else if (b == 'e' || b == 'E') && i > start {
+                    i += 1;
+                    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+                        i += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if let Ok(val) = d[start..i].parse::<f32>() {
+                out.push(Err(val));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Parse closed 2D contours from an SVG `<path d="...">` string (`M/m, L/l, H/h, V/v, C/c, Z/z`).
+fn parse_svg_path_contours(d: &str) -> Vec<Vec<[f32; 2]>> {
+    let tokens = tokenize_svg_path(d);
+    let mut contours = Vec::new();
+    let mut current: Vec<[f32; 2]> = Vec::new();
+    let mut cur = [0.0_f32, 0.0_f32];
+    let mut start = [0.0_f32, 0.0_f32];
+    let mut cmd = 'M';
+    let mut idx = 0;
+
+    let next_num = |idx: &mut usize| -> Option<f32> {
+        match tokens.get(*idx) {
+            Some(Err(v)) => {
+                *idx += 1;
+                Some(*v)
+            }
+            _ => None,
+        }
+    };
+
+    while idx < tokens.len() {
+        if let Ok(c) = tokens[idx] {
+            cmd = c;
+            idx += 1;
+            if cmd == 'Z' || cmd == 'z' {
+                if current.len() >= 3 {
+                    contours.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+                cur = start;
+                continue;
+            }
+        }
+        match cmd {
+            'M' | 'm' => {
+                let (Some(x), Some(y)) = (next_num(&mut idx), next_num(&mut idx)) else {
+                    break;
+                };
+                if current.len() >= 3 {
+                    contours.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+                cur = if cmd == 'm' {
+                    [cur[0] + x, cur[1] + y]
+                } else {
+                    [x, y]
+                };
+                start = cur;
+                current.push(cur);
+                cmd = if cmd == 'm' { 'l' } else { 'L' };
+            }
+            'L' | 'l' => {
+                let (Some(x), Some(y)) = (next_num(&mut idx), next_num(&mut idx)) else {
+                    break;
+                };
+                cur = if cmd == 'l' {
+                    [cur[0] + x, cur[1] + y]
+                } else {
+                    [x, y]
+                };
+                current.push(cur);
+            }
+            'H' | 'h' => {
+                let Some(x) = next_num(&mut idx) else {
+                    break;
+                };
+                cur[0] = if cmd == 'h' { cur[0] + x } else { x };
+                current.push(cur);
+            }
+            'V' | 'v' => {
+                let Some(y) = next_num(&mut idx) else {
+                    break;
+                };
+                cur[1] = if cmd == 'v' { cur[1] + y } else { y };
+                current.push(cur);
+            }
+            'C' | 'c' => {
+                let (Some(x1), Some(y1), Some(x2), Some(y2), Some(x), Some(y)) = (
+                    next_num(&mut idx),
+                    next_num(&mut idx),
+                    next_num(&mut idx),
+                    next_num(&mut idx),
+                    next_num(&mut idx),
+                    next_num(&mut idx),
+                ) else {
+                    break;
+                };
+                let p0 = cur;
+                let (p1, p2, p3) = if cmd == 'c' {
+                    (
+                        [p0[0] + x1, p0[1] + y1],
+                        [p0[0] + x2, p0[1] + y2],
+                        [p0[0] + x, p0[1] + y],
+                    )
+                } else {
+                    ([x1, y1], [x2, y2], [x, y])
+                };
+                for step in 1..=8 {
+                    let t = step as f32 / 8.0;
+                    let u = 1.0 - t;
+                    let bx = u * u * u * p0[0]
+                        + 3.0 * u * u * t * p1[0]
+                        + 3.0 * u * t * t * p2[0]
+                        + t * t * t * p3[0];
+                    let by = u * u * u * p0[1]
+                        + 3.0 * u * u * t * p1[1]
+                        + 3.0 * u * t * t * p2[1]
+                        + t * t * t * p3[1];
+                    current.push([bx, by]);
+                }
+                cur = p3;
+            }
+            _ => {
+                idx += 1;
+            }
+        }
+    }
+    if current.len() >= 3 {
+        contours.push(current);
+    }
+    contours
+}
+
+/// Rasterize an SVG icon (`<path d="...">` on a 16×16 viewBox) into a white-alpha `ColorImage`.
+fn rasterize_svg_icon(svg: &str, out_size: usize) -> Option<egui::ColorImage> {
+    let mut contours = Vec::new();
+    let mut rest = svg;
+    while let Some(p_idx) = rest.find("<path") {
+        let after = &rest[p_idx + 5..];
+        let Some(end_idx) = after.find('>') else {
+            break;
+        };
+        let tag = &after[..end_idx];
+        for marker in ["d=\"", "d='"] {
+            if let Some(d_start) = tag.find(marker) {
+                let quote = marker.as_bytes()[2] as char;
+                let d_rest = &tag[d_start + 3..];
+                if let Some(d_end) = d_rest.find(quote) {
+                    contours.extend(parse_svg_path_contours(&d_rest[..d_end]));
+                }
+            }
+        }
+        rest = &after[end_idx + 1..];
+    }
+    if contours.is_empty() {
+        return None;
+    }
+
+    let view_size = 16.0_f32;
+    let mut pixels = vec![Color32::TRANSPARENT; out_size * out_size];
+    let mut any_opaque = false;
+    let samples = 4;
+
+    for y in 0..out_size {
+        for x in 0..out_size {
+            let mut hits = 0u32;
+            for sy in 0..samples {
+                let py =
+                    (y as f32 + (sy as f32 + 0.5) / samples as f32) / out_size as f32 * view_size;
+                for sx in 0..samples {
+                    let px = (x as f32 + (sx as f32 + 0.5) / samples as f32) / out_size as f32
+                        * view_size;
+                    let inside = contours.iter().any(|poly| {
+                        let mut winding = 0i32;
+                        let n = poly.len();
+                        for i in 0..n {
+                            let a = poly[i];
+                            let b = poly[(i + 1) % n];
+                            if (a[1] <= py && b[1] > py) || (b[1] <= py && a[1] > py) {
+                                let t = (py - a[1]) / (b[1] - a[1]);
+                                let ix = a[0] + t * (b[0] - a[0]);
+                                if px < ix {
+                                    winding += if b[1] > a[1] { 1 } else { -1 };
+                                }
+                            }
+                        }
+                        winding != 0
+                    });
+                    if inside {
+                        hits += 1;
+                    }
+                }
+            }
+            if hits > 0 {
+                let alpha = ((hits * 255) / (samples * samples) as u32) as u8;
+                any_opaque = true;
+                pixels[y * out_size + x] = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+            }
+        }
+    }
+    any_opaque.then(|| egui::ColorImage {
+        size: [out_size, out_size],
+        source_size: Vec2::splat(out_size as f32),
+        pixels,
+    })
+}
+
+/// Locate and rasterize the active Linux / FreeDesktop icon theme's `window-close` icon.
+#[cfg(target_os = "linux")]
+fn load_system_close_icon(size: usize) -> Option<egui::ColorImage> {
+    use std::path::PathBuf;
+
+    let mut themes = Vec::new();
+    let config_root = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    if let Some(cfg) = &config_root {
+        for sub in ["gtk-4.0/settings.ini", "gtk-3.0/settings.ini"] {
+            if let Ok(text) = std::fs::read_to_string(cfg.join(sub)) {
+                for line in text.lines() {
+                    if let Some(val) = line.trim().strip_prefix("gtk-icon-theme-name")
+                        && let Some((_, rhs)) = val.split_once('=')
+                    {
+                        let name = rhs.trim().trim_matches('"').trim_matches('\'');
+                        if !name.is_empty() && !themes.contains(&name.to_owned()) {
+                            themes.push(name.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if themes.is_empty()
+        && let Ok(out) = std::process::Command::new("gsettings")
+            .args(["get", "org.gnome.desktop.interface", "icon-theme"])
+            .output()
+        && out.status.success()
+    {
+        let name = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .trim_matches('\'')
+            .trim_matches('"')
+            .to_owned();
+        if !name.is_empty() {
+            themes.push(name);
+        }
+    }
+    for fallback in [
+        "Papirus-Dark",
+        "Papirus",
+        "Adwaita",
+        "breeze-dark",
+        "breeze",
+    ] {
+        if !themes.iter().any(|t| t == fallback) {
+            themes.push(fallback.to_owned());
+        }
+    }
+
+    let mut base_dirs = Vec::new();
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+        base_dirs.push(PathBuf::from(data_home).join("icons"));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        let h = PathBuf::from(home);
+        base_dirs.push(h.join(".local/share/icons"));
+        base_dirs.push(h.join(".icons"));
+    }
+    base_dirs.push(PathBuf::from("/usr/local/share/icons"));
+    base_dirs.push(PathBuf::from("/usr/share/icons"));
+
+    let rel_paths = [
+        "16x16/symbolic/actions/window-close-symbolic.svg",
+        "16x16/actions/window-close.svg",
+        "symbolic/ui/window-close-symbolic.svg",
+        "symbolic/actions/window-close-symbolic.svg",
+        "actions/16/window-close-symbolic.svg",
+        "actions/16/window-close.svg",
+        "24x24/symbolic/actions/window-close-symbolic.svg",
+        "24x24/actions/window-close.svg",
+        "actions/24/window-close-symbolic.svg",
+        "actions/24/window-close.svg",
+    ];
+
+    for theme in &themes {
+        for base in &base_dirs {
+            let root = base.join(theme);
+            for rel in &rel_paths {
+                let candidate = root.join(rel);
+                if let Ok(svg) = std::fs::read_to_string(&candidate)
+                    && let Some(img) = rasterize_svg_icon(&svg, size)
+                {
+                    return Some(img);
+                }
+            }
+        }
+    }
+    None
+}
+
 struct Confirmation {
     fingerprint: String,
     name: String,
@@ -198,6 +535,8 @@ pub struct App {
     tray_failed: bool,
     tray_sender: mpsc::Sender<TrayAction>,
     tray_events: Receiver<TrayAction>,
+    #[cfg(target_os = "linux")]
+    close_icon: Option<Option<egui::TextureHandle>>,
 }
 impl App {
     pub fn new(worker: Worker, name: String, smoke: bool, can_hide: bool) -> Self {
@@ -252,6 +591,8 @@ impl App {
             tray_failed: false,
             tray_sender,
             tray_events,
+            #[cfg(target_os = "linux")]
+            close_icon: None,
         }
     }
     fn ensure_tray(&mut self, ctx: &egui::Context) {
@@ -1440,15 +1781,66 @@ impl eframe::App for App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     #[cfg(target_os = "linux")]
-                    if ui
-                        .button(RichText::new("✕").strong())
-                        .on_hover_text("Minimize to tray / background")
-                        .clicked()
                     {
-                        if self.can_hide && (self.tray.is_some() || self.hide_tray) {
-                            Self::hide_window(ctx);
+                        let tex = self
+                            .close_icon
+                            .get_or_insert_with(|| {
+                                load_system_close_icon(32).map(|img| {
+                                    ctx.load_texture(
+                                        "system-window-close",
+                                        img,
+                                        egui::TextureOptions::LINEAR,
+                                    )
+                                })
+                            })
+                            .clone();
+                        let (btn_rect, resp) =
+                            ui.allocate_exact_size(Vec2::splat(26.), Sense::click());
+                        let hovered = resp.hovered();
+                        if hovered || resp.is_pointer_button_down_on() {
+                            let bg = if resp.is_pointer_button_down_on() {
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 42)
+                            } else {
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 24)
+                            };
+                            ui.painter().circle_filled(btn_rect.center(), 12.5, bg);
+                        }
+                        let tint = if hovered {
+                            Color32::WHITE
                         } else {
-                            self.status = "Hiding needs X11/Xwayland on Linux".into();
+                            Color32::from_rgb(220, 224, 230)
+                        };
+                        if let Some(tex) = tex {
+                            let icon_rect =
+                                Rect::from_center_size(btn_rect.center(), Vec2::splat(16.));
+                            ui.painter().image(
+                                tex.id(),
+                                icon_rect,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+                                tint,
+                            );
+                        } else {
+                            let c = btn_rect.center();
+                            let d = 4.5;
+                            let stroke = Stroke::new(1.7_f32, tint);
+                            ui.painter().line_segment(
+                                [c + egui::vec2(-d, -d), c + egui::vec2(d, d)],
+                                stroke,
+                            );
+                            ui.painter().line_segment(
+                                [c + egui::vec2(-d, d), c + egui::vec2(d, -d)],
+                                stroke,
+                            );
+                        }
+                        if resp
+                            .on_hover_text("Minimize to tray / background")
+                            .clicked()
+                        {
+                            if self.can_hide && (self.tray.is_some() || self.hide_tray) {
+                                Self::hide_window(ctx);
+                            } else {
+                                self.status = "Hiding needs X11/Xwayland on Linux".into();
+                            }
                         }
                     }
                     let sharing_button = if self.enabled {
@@ -1901,5 +2293,23 @@ mod tests {
         };
         assert!(box_size(Some(wide)).x > box_size(None).x);
         assert_eq!(box_size(None), egui::vec2(96., 58.));
+    }
+
+    #[test]
+    fn svg_close_icon_rasterizer_renders_papirus_adwaita_and_breeze_paths() {
+        let papirus = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <path d="M 5,4 C 4.4477,4 4,4.4477 4,5 4,5.2652 4.1055,5.5195 4.293,5.707 L 10.293,11.707 C 10.48,11.895 10.735,12 11,12 11.552,12 12,11.552 12,11 12,10.735 11.895,10.48 11.707,10.293 L 5.707,4.293 C 5.5195,4.1055 5.2652,4 5,4 Z"/>
+            <path d="M 5,12 C 4.4477,12 4,11.552 4,11 4,10.735 4.1055,10.48 4.293,10.293 L 10.293,4.293 C 10.48,4.105 10.735,4 11,4 11.552,4 12,4.448 12,5 12,5.265 11.895,5.52 11.707,5.707 L 5.707,11.707 C 5.5195,11.895 5.2652,12 5,12 Z"/>
+        </svg>"#;
+        let adwaita = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M4 4h1.03125c.253906.011719.511719.128906.6875.3125L8 6.59375l2.3125-2.28125c.265625-.230469.445312-.304688.6875-.3125h1v1c0 .285156-.035156.550781-.25.75L9.46875 8.03125l2.25 2.25c.1875.1875.28125.453125.28125.71875v1h-1c-.265625 0-.53125-.09375-.71875-.28125L8 9.4375l-2.28125 2.28125C5.53125 11.90625 5.265625 12 5 12H4v-1c0-.265625.09375-.53125.28125-.71875l2.28125-2.25L4.28125 5.75C4.070312 5.554688 3.976562 5.28125 4 5zm0 0"/></svg>"#;
+        let breeze = r#"<svg viewBox="0 0 16 16"><path d="M 4,3.1523438 3.1523438,4 7.1523437,8 3.1523438,12 4,12.847656 8,8.8476563 12,12.847656 12.847656,12 8.8476563,8 12.847656,4 12,3.1523438 8,7.1523437 Z"/></svg>"#;
+
+        for svg in [papirus, adwaita, breeze] {
+            let img = rasterize_svg_icon(svg, 32).expect("should rasterize icon");
+            assert_eq!(img.size, [32, 32]);
+            // Center of the X (around 16, 16) is filled; corner (0, 0) is transparent.
+            assert_eq!(img.pixels[0].a(), 0);
+            assert!(img.pixels[16 * 32 + 16].a() > 200);
+        }
     }
 }
