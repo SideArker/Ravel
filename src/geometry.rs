@@ -122,7 +122,7 @@ pub fn monitor_bounds(monitors: &[Monitor]) -> Result<Display> {
     Ok(bounds)
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Side {
     Left,
     #[default]
@@ -142,6 +142,23 @@ impl Side {
     }
     pub fn horizontal(self) -> bool {
         matches!(self, Self::Left | Self::Right)
+    }
+    pub fn to_handle(self) -> u64 {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
+            Self::Top => 2,
+            Self::Bottom => 3,
+        }
+    }
+    pub fn from_handle(handle: u64) -> Option<Self> {
+        match handle {
+            0 => Some(Self::Left),
+            1 => Some(Self::Right),
+            2 => Some(Self::Top),
+            3 => Some(Self::Bottom),
+            _ => None,
+        }
     }
 }
 

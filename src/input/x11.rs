@@ -22,7 +22,7 @@ pub struct X11 {
     root: u32,
     display: Display,
     monitors: Vec<Monitor>,
-    side: Option<Side>,
+    sides: Vec<Side>,
     active: bool,
     entry: [f64; 2],
     pending: VecDeque<CaptureEvent>,
@@ -46,7 +46,7 @@ impl X11 {
             root,
             display,
             monitors,
-            side: None,
+            sides: Vec::new(),
             active: false,
             entry: [0.; 2],
             pending: VecDeque::new(),
@@ -110,9 +110,9 @@ impl X11 {
         );
         Ok(())
     }
-    pub fn arm(&mut self, side: Option<Side>) -> Result<()> {
+    pub fn arm_sides(&mut self, sides: &[Side]) -> Result<()> {
         self.release()?;
-        self.side = side;
+        self.sides = sides.to_vec();
         Ok(())
     }
     pub fn release(&mut self) -> Result<()> {
@@ -140,12 +140,12 @@ impl X11 {
         if !self.active {
             // Drain old synthetic events before considering a fresh physical edge.
             while self.conn.poll_for_event()?.is_some() {}
-            let Some(side) = self.side else {
+            if self.sides.is_empty() {
                 return Ok(None);
-            };
+            }
             let p = self.conn.query_pointer(self.root)?.reply()?;
             let point = [p.root_x as f64, p.root_y as f64];
-            let at = self.display.on_edge(point, side);
+            let at = self.sides.iter().any(|&s| self.display.on_edge(point, s));
             if !at {
                 return Ok(None);
             }

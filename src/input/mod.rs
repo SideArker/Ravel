@@ -27,7 +27,8 @@ pub struct Backend {
     pub monitors: Vec<Monitor>,
     pub label: &'static str,
     held: Held,
-    armed: bool,
+    #[allow(dead_code)]
+    armed_sides: Vec<Side>,
     repeat: Option<(u32, std::time::Instant)>,
 }
 // A single backend lives for the session; boxing would add indirection to save a few hundred bytes.
@@ -126,7 +127,7 @@ impl Backend {
                         monitors,
                         label: "Wayland: layer-shell + wlroots virtual input",
                         held: Held::default(),
-                        armed: false,
+                        armed_sides: Vec::new(),
                         repeat: None,
                     });
                 }
@@ -167,7 +168,7 @@ impl Backend {
                     monitors,
                     label: "Wayland: InputCapture + RemoteDesktop portals",
                     held: Held::default(),
-                    armed: false,
+                    armed_sides: Vec::new(),
                     repeat: None,
                 });
             }
@@ -182,7 +183,7 @@ impl Backend {
                 monitors,
                 label: "Native X11: grabs + XTest",
                 held: Held::default(),
-                armed: false,
+                armed_sides: Vec::new(),
                 repeat: None,
             })
         }
@@ -205,7 +206,7 @@ impl Backend {
                 monitors,
                 label: "Windows: low-level hooks + SendInput",
                 held: Held::default(),
-                armed: false,
+                armed_sides: Vec::new(),
                 repeat: None,
             })
         }
@@ -235,7 +236,7 @@ impl Backend {
                 monitors,
                 label: "macOS: Core Graphics event tap + posting",
                 held: Held::default(),
-                armed: false,
+                armed_sides: Vec::new(),
                 repeat: None,
             })
         }
@@ -245,36 +246,57 @@ impl Backend {
         }
     }
     pub async fn arm(&mut self, side: Option<Side>) -> Result<()> {
-        if let Some(side) = side {
+        self.arm_sides(side.as_slice()).await
+    }
+    pub async fn arm_sides(&mut self, sides: &[Side]) -> Result<()> {
+        let mut unique = Vec::new();
+        let bounds = monitor_bounds(&self.monitors)?;
+        for &side in sides {
             ensure!(
-                self.display
-                    .is_outer_edge(monitor_bounds(&self.monitors)?, side),
+                self.display.is_outer_edge(bounds, side),
                 "Selected handoff monitor is not on the outer {side:?} edge"
             );
+            if !unique.contains(&side) {
+                unique.push(side);
+            }
         }
         match &mut self.platform {
             #[cfg(target_os = "linux")]
-            Platform::X11(x) => x.arm(side)?,
+            Platform::X11(x) => x.arm_sides(&unique)?,
             #[cfg(target_os = "linux")]
-            Platform::Wayland { capture, .. } => arm_native(capture, &mut self.armed, side).await?,
+            Platform::Wayland { capture, .. } => {
+                arm_native(capture, &mut self.armed_sides, &unique).await?
+            }
             #[cfg(target_os = "linux")]
-            Platform::Portal { capture, .. } => arm_native(capture, &mut self.armed, side).await?,
+            Platform::Portal { capture, .. } => {
+                arm_native(capture, &mut self.armed_sides, &unique).await?
+            }
             #[cfg(windows)]
-            Platform::Windows(capture) => arm_native(capture, &mut self.armed, side).await?,
+            Platform::Windows(capture) => {
+                arm_native(capture, &mut self.armed_sides, &unique).await?
+            }
             #[cfg(target_os = "macos")]
-            Platform::MacOS { capture, .. } => arm_native(capture, &mut self.armed, side).await?,
+            Platform::MacOS { capture, .. } => {
+                arm_native(capture, &mut self.armed_sides, &unique).await?
+            }
             #[cfg(test)]
             Platform::Test { trace, .. } => {
-                trace.state.borrow_mut().armed = side;
+                let mut state = trace.state.borrow_mut();
+                state.armed = unique.first().copied();
+                state.armed_sides = unique;
+                drop(state);
                 trace.changed.notify_one();
             }
         }
         Ok(())
     }
     pub async fn next(&mut self) -> Result<CaptureEvent> {
+        self.next_with_side().await.map(|(_, e)| e)
+    }
+    pub async fn next_with_side(&mut self) -> Result<(Option<Side>, CaptureEvent)> {
         match &mut self.platform {
             #[cfg(target_os = "linux")]
-            Platform::X11(x) => x.next().await,
+            Platform::X11(x) => Ok((None, x.next().await?)),
             #[cfg(target_os = "linux")]
             Platform::Wayland { capture, .. } => next_native(capture).await,
             #[cfg(target_os = "linux")]
@@ -287,6 +309,7 @@ impl Backend {
             Platform::Test { events, .. } => events
                 .recv()
                 .await
+                .map(|e| (None, e))
                 .ok_or_else(|| anyhow::anyhow!("Test capture closed")),
         }
     }
@@ -506,36 +529,45 @@ impl Drop for Backend {
 }
 async fn arm_native(
     capture: &mut InputCapture,
-    armed: &mut bool,
-    side: Option<Side>,
+    armed: &mut Vec<Side>,
+    sides: &[Side],
 ) -> Result<()> {
-    if *armed {
+    if !armed.is_empty() {
         capture.release().await?;
-        capture.destroy(0).await?;
-        *armed = false;
     }
-    if let Some(side) = side {
-        capture
-            .create(
-                0,
-                match side {
-                    Side::Left => input_capture::Position::Left,
-                    Side::Right => input_capture::Position::Right,
-                    Side::Top => input_capture::Position::Top,
-                    Side::Bottom => input_capture::Position::Bottom,
-                },
-            )
-            .await?;
-        *armed = true;
+    let mut i = 0;
+    while i < armed.len() {
+        if !sides.contains(&armed[i]) {
+            let removed = armed.remove(i);
+            capture.destroy(removed.to_handle()).await?;
+        } else {
+            i += 1;
+        }
+    }
+    for &side in sides {
+        if !armed.contains(&side) {
+            capture
+                .create(
+                    side.to_handle(),
+                    match side {
+                        Side::Left => input_capture::Position::Left,
+                        Side::Right => input_capture::Position::Right,
+                        Side::Top => input_capture::Position::Top,
+                        Side::Bottom => input_capture::Position::Bottom,
+                    },
+                )
+                .await?;
+            armed.push(side);
+        }
     }
     Ok(())
 }
-async fn next_native(capture: &mut InputCapture) -> Result<CaptureEvent> {
-    let (_, e) = capture
+async fn next_native(capture: &mut InputCapture) -> Result<(Option<Side>, CaptureEvent)> {
+    let (handle, e) = capture
         .next()
         .await
         .ok_or_else(|| anyhow::anyhow!("Input capture stream closed"))??;
-    Ok(e)
+    Ok((Side::from_handle(handle), e))
 }
 
 fn repeatable(code: u32) -> bool {
@@ -742,6 +774,7 @@ mod native_tests {
 pub(crate) struct TestState {
     pub injected: Vec<Input>,
     pub armed: Option<Side>,
+    pub armed_sides: Vec<Side>,
     pub closed: bool,
     pub fail_next: bool,
 }
@@ -808,7 +841,7 @@ impl Backend {
                 }],
                 label: "Test input",
                 held: Held::default(),
-                armed: false,
+                armed_sides: Vec::new(),
                 repeat: None,
             },
             tx,
