@@ -100,8 +100,8 @@ $ravelEntries = @($ravelUserPath -split ';' | Where-Object {{ $_ -and $_.TrimEnd
 if ((Test-Path -LiteralPath '{dir}') -and -not (Get-ChildItem -LiteralPath '{dir}' -Force)) {{ [IO.Directory]::Delete('{dir}') }}
 "#,
         pid = pid,
-        dir = quote(&installed),
-        programs = quote(&programs)
+        dir = quote(installed),
+        programs = quote(programs)
     )
 }
 
