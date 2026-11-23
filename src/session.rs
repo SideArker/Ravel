@@ -2,7 +2,7 @@ use crate::{
     geometry::{Display, Layout, Monitor, Side, monitor_bounds},
     input::{Backend, CaptureEvent, Held},
     protocol::{self, Input, Message, point_valid},
-    store::Store,
+    store::{HandoffSettings, Store},
 };
 use anyhow::{Result, anyhow, bail, ensure};
 use input_event::{Event, KeyboardEvent, PointerEvent};
@@ -82,17 +82,16 @@ struct HandoffGate {
     started: Instant,
     distance: f64,
     reported_step: u8,
+    settings: HandoffSettings,
 }
 impl HandoffGate {
-    const DISTANCE: f64 = 96.;
-    const TIMEOUT: Duration = Duration::from_millis(1500);
-
-    fn new(entry: [f64; 2]) -> Self {
+    fn new(entry: [f64; 2], settings: HandoffSettings) -> Self {
         Self {
             entry,
             started: Instant::now(),
             distance: 0.,
             reported_step: 0,
+            settings,
         }
     }
     fn push(&mut self, side: Side, dx: f64, dy: f64) -> f32 {
@@ -102,11 +101,11 @@ impl HandoffGate {
             Side::Top => -dy,
             Side::Bottom => dy,
         };
-        self.distance = (self.distance + outward).clamp(0., Self::DISTANCE);
-        (self.distance / Self::DISTANCE) as f32
+        self.distance = (self.distance + outward).clamp(0., self.settings.push_distance);
+        (self.distance / self.settings.push_distance) as f32
     }
     fn expired(&self, now: Instant) -> bool {
-        now.duration_since(self.started) >= Self::TIMEOUT
+        now.duration_since(self.started) >= Duration::from_millis(self.settings.timeout_ms)
     }
 }
 impl Direction {
@@ -352,7 +351,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                         if direction!=Direction::Local || rearm_at.is_some() || !layout.transfer.can_send(){backend.release_capture().await?;continue;}
                         if !backend.display.on_edge(entry, layout.side) {backend.release_capture().await?;continue;}
                         if layout.enter(backend.display.normalize(entry)).is_some() {
-                            handoff=Some(HandoffGate::new(entry));
+                            handoff=Some(HandoffGate::new(entry, signals.store.borrow().handoff_settings()));
                             let _=signals.feedback.try_send(Feedback::Handoff{progress:0.,incoming:false});
                         }else{backend.arm(None).await?;rearm_at=Some(Instant::now()+Duration::from_millis(350));}
                     },
@@ -1059,6 +1058,9 @@ async fn run_hub_inner(
                 };
                 match event {
                     CaptureEvent::Begin { point: entry } => {
+                        if std::env::var("RAVEL_DEBUG").as_deref() == Ok("1") {
+                            eprintln!("[ravel] native edge entered: {side_hint:?}");
+                        }
                         if direction != HubDirection::Local || rearm_at.is_some() {
                             let _ = b.release_capture().await;
                             continue;
@@ -1073,16 +1075,22 @@ async fn run_hub_inner(
                         if let Some((fp, _)) = matched {
                             handoff = Some(HubGate {
                                 fingerprint: fp.clone(),
-                                gate: HandoffGate::new(entry),
+                                gate: HandoffGate::new(entry, signals.store.borrow().handoff_settings()),
                             });
                             let _ = signals.feedback.try_send(Feedback::Handoff { progress: 0., incoming: false });
                         } else {
+                            if std::env::var("RAVEL_DEBUG").as_deref() == Ok("1") {
+                                eprintln!("[ravel] edge rejected: no sending peer matches this monitor, side and overlap");
+                            }
                             let _ = b.arm_sides(&[]).await;
                             rearm_at = Some(Instant::now() + Duration::from_millis(350));
                         }
                     }
                     CaptureEvent::Input(event) => {
                         if handoff.as_ref().is_some_and(|h| h.gate.expired(Instant::now())) {
+                            if std::env::var("RAVEL_DEBUG").as_deref() == Ok("1") {
+                                eprintln!("[ravel] push timed out before reaching configured strength");
+                            }
                             handoff = None;
                             let _ = b.arm_sides(&[]).await;
                             rearm_at = Some(Instant::now() + Duration::from_millis(350));
@@ -1270,15 +1278,33 @@ mod tests {
             (Side::Top, 0., -1.),
             (Side::Bottom, 0., 1.),
         ] {
-            let mut gate = HandoffGate::new([0., 0.]);
+            let mut gate = HandoffGate::new([0., 0.], HandoffSettings::default());
             assert!(gate.push(side, dx * 20., dy * 20.) < 1.);
             assert_eq!(gate.push(side, -dx * 30., -dy * 30.), 0.);
             assert!(gate.push(side, dx * 48., dy * 48.) < 1.);
             assert_eq!(gate.push(side, dx * 48., dy * 48.), 1.);
-            assert!(!gate.expired(gate.started + HandoffGate::TIMEOUT - Duration::from_millis(1)));
-            assert!(gate.expired(gate.started + HandoffGate::TIMEOUT));
+            assert!(
+                !gate
+                    .expired(gate.started + Duration::from_millis(1500) - Duration::from_millis(1))
+            );
+            assert!(gate.expired(gate.started + Duration::from_millis(1500)));
         }
     }
+    #[test]
+    fn configured_strength_and_timeout_apply_to_handoff_gate() {
+        let mut gate = HandoffGate::new(
+            [0., 0.],
+            HandoffSettings {
+                push_distance: 32.,
+                timeout_ms: 2500,
+            },
+        );
+        assert!(gate.push(Side::Left, -31., 0.) < 1.);
+        assert_eq!(gate.push(Side::Left, -1., 0.), 1.);
+        assert!(!gate.expired(gate.started + Duration::from_millis(2499)));
+        assert!(gate.expired(gate.started + Duration::from_millis(2500)));
+    }
+
     #[test]
     fn no_input_before_ownership_and_no_overlapping_streams() {
         let mut s = Direction::Local;

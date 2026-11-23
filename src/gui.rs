@@ -4,7 +4,7 @@ use crate::{
     identity::pretty_fingerprint,
     runtime::{Command, Event, Worker},
     session::{Direction, Feedback, PeerConnection},
-    store::TrustedPeer,
+    store::{HandoffSettings, TrustedPeer},
 };
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use semver::Version;
@@ -519,6 +519,13 @@ enum PairStep {
     Pin,
     Fingerprint,
 }
+#[derive(Default, PartialEq)]
+enum MainTab {
+    #[default]
+    Devices,
+    Settings,
+}
+
 pub struct App {
     worker: Worker,
     repaint_registered: bool,
@@ -551,6 +558,9 @@ pub struct App {
     dismissed_update: Option<Version>,
     show_update: bool,
     autostart_enabled: bool,
+    autostart_task: Option<Receiver<anyhow::Result<bool>>>,
+    tab: MainTab,
+    handoff_settings: HandoffSettings,
     show_autostart_prompt: bool,
     hide_tray: bool,
     exit_at: Option<Instant>,
@@ -607,6 +617,9 @@ impl App {
             dismissed_update: None,
             show_update: false,
             autostart_enabled,
+            autostart_task: None,
+            tab: MainTab::Devices,
+            handoff_settings: HandoffSettings::default(),
             show_autostart_prompt: false,
             hide_tray: false,
             exit_at: smoke.then(|| Instant::now() + Duration::from_secs(3)),
@@ -770,6 +783,7 @@ impl App {
     fn update_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.worker.events.try_recv() {
             match event {
+                Event::HandoffSettings(settings) => self.handoff_settings = settings,
                 Event::Show => {
                     self.user_interacted = true;
                     Self::show_window(ctx);
@@ -1598,108 +1612,139 @@ impl App {
         }
     }
 
-    fn show_details(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Details").show(ui, |ui| {
-            ui.weak(format!(
-                "Ravel {} · protocol {}",
-                env!("CARGO_PKG_VERSION"),
-                crate::protocol::VERSION
-            ));
-            let mut restart_requested = false;
-            let mut manual_update = None;
-            ui.horizontal(|ui| {
-                ui.label(format!("Version v{}", env!("CARGO_PKG_VERSION")));
-                match &self.updates {
-                    UpdateState::Checking(_) => {
-                        ui.weak("· Checking for updates…");
-                    }
-                    UpdateState::Updating(version, _) => {
-                        ui.weak(format!("· Downloading & installing v{version}…"));
-                    }
-                    UpdateState::Updated(version) => {
-                        ui.colored_label(
-                            Color32::from_rgb(100, 220, 135),
-                            format!("· Updated to v{version}"),
-                        );
-                        if ui.small_button("Restart now").clicked() {
-                            restart_requested = true;
-                        }
-                    }
-                    UpdateState::Available(version, err) => {
-                        if ui.button(format!("Update to v{version}")).clicked() {
-                            manual_update = Some(version.clone());
-                        }
-                        if let Some(e) = err {
-                            ui.weak(format!("({e})"));
-                        }
-                    }
-                    UpdateState::Current => {
-                        ui.weak("· Up to date");
-                    }
-                    UpdateState::Failed(error) => {
-                        ui.weak(format!("· Update check failed ({error})"));
-                    }
-                }
-                if !matches!(
-                    self.updates,
-                    UpdateState::Checking(_) | UpdateState::Updating(_, _)
-                ) && ui.small_button("Check now").clicked()
-                {
-                    self.user_interacted = true;
-                    self.last_update_check = Instant::now();
-                    self.updates = Self::start_update_check();
-                }
-            });
-            if let Some(v) = manual_update {
-                self.updates = Self::start_self_update(v);
-            }
-            if restart_requested {
-                self.restart_updated(ctx);
-            }
-
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "Autostart: {}",
-                    if self.autostart_enabled {
-                        "Enabled"
-                    } else {
-                        "Disabled"
-                    }
-                ));
-                let btn = if self.autostart_enabled {
-                    "Disable autostart"
-                } else {
-                    "Enable autostart"
-                };
-                if ui.small_button(btn).clicked() {
-                    self.user_interacted = true;
-                    let target = !self.autostart_enabled;
-                    match crate::updates::set_autostart(target) {
-                        Ok(()) => {
-                            self.autostart_enabled = target;
-                            self.command(Command::MarkAutostartPrompted);
-                        }
-                        Err(e) => self.status = format!("Autostart failed: {e}"),
-                    }
-                }
-                ui.separator();
-                let tray_label = if self.hide_tray {
-                    "Show tray icon"
-                } else {
-                    "Hide tray icon"
-                };
-                if ui.small_button(tray_label).clicked() {
-                    self.user_interacted = true;
-                    self.hide_tray = !self.hide_tray;
-                    if self.hide_tray {
-                        self.tray = None;
-                    } else {
-                        self.tray_failed = false;
-                    }
-                    self.command(Command::SetHideTray(self.hide_tray));
-                }
-            });
+    fn change_autostart(&mut self, enabled: bool) {
+        let (tx, rx) = mpsc::channel();
+        self.autostart_task = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::updates::set_autostart(enabled).map(|()| enabled));
         });
+    }
+    fn show_settings(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.heading("Handoff settings");
+        ui.label("Push strength — lower values make crossing easier");
+        ui.add(
+            egui::Slider::new(&mut self.handoff_settings.push_distance, 8. ..=512.)
+                .text("motion units"),
+        );
+        ui.label("Time allowed to push through the edge");
+        ui.add(egui::Slider::new(&mut self.handoff_settings.timeout_ms, 250..=5000).text("ms"));
+        ui.horizontal(|ui| {
+            if ui.button("Save settings").clicked() {
+                self.command(Command::SetHandoffSettings(self.handoff_settings));
+            }
+            if ui.button("Reset defaults").clicked() {
+                self.handoff_settings = HandoffSettings::default();
+                self.command(Command::SetHandoffSettings(self.handoff_settings));
+            }
+        });
+        ui.weak("Saved on this PC. Changes apply to the next handoff; transfer direction stays configured per pair.");
+        ui.separator();
+        self.show_details(ctx, ui);
+    }
+    fn show_details(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Startup, tray & updates")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.weak(format!(
+                    "Ravel {} · protocol {}",
+                    env!("CARGO_PKG_VERSION"),
+                    crate::protocol::VERSION
+                ));
+                let mut restart_requested = false;
+                let mut manual_update = None;
+                ui.horizontal(|ui| {
+                    ui.label(format!("Version v{}", env!("CARGO_PKG_VERSION")));
+                    match &self.updates {
+                        UpdateState::Checking(_) => {
+                            ui.weak("· Checking for updates…");
+                        }
+                        UpdateState::Updating(version, _) => {
+                            ui.weak(format!("· Downloading & installing v{version}…"));
+                        }
+                        UpdateState::Updated(version) => {
+                            ui.colored_label(
+                                Color32::from_rgb(100, 220, 135),
+                                format!("· Updated to v{version}"),
+                            );
+                            if ui.small_button("Restart now").clicked() {
+                                restart_requested = true;
+                            }
+                        }
+                        UpdateState::Available(version, err) => {
+                            if ui.button(format!("Update to v{version}")).clicked() {
+                                manual_update = Some(version.clone());
+                            }
+                            if let Some(e) = err {
+                                ui.weak(format!("({e})"));
+                            }
+                        }
+                        UpdateState::Current => {
+                            ui.weak("· Up to date");
+                        }
+                        UpdateState::Failed(error) => {
+                            ui.weak(format!("· Update check failed ({error})"));
+                        }
+                    }
+                    if !matches!(
+                        self.updates,
+                        UpdateState::Checking(_) | UpdateState::Updating(_, _)
+                    ) && ui.small_button("Check now").clicked()
+                    {
+                        self.user_interacted = true;
+                        self.last_update_check = Instant::now();
+                        self.updates = Self::start_update_check();
+                    }
+                });
+                if let Some(v) = manual_update {
+                    self.updates = Self::start_self_update(v);
+                }
+                if restart_requested {
+                    self.restart_updated(ctx);
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Autostart: {}",
+                        if self.autostart_enabled {
+                            "Enabled"
+                        } else {
+                            "Disabled"
+                        }
+                    ));
+                    let btn = if self.autostart_enabled {
+                        "Disable autostart"
+                    } else {
+                        "Enable autostart"
+                    };
+                    if ui
+                        .add_enabled(
+                            self.autostart_task.is_none(),
+                            egui::Button::new(btn).small(),
+                        )
+                        .clicked()
+                    {
+                        self.user_interacted = true;
+                        let target = !self.autostart_enabled;
+                        self.change_autostart(target);
+                    }
+                    ui.separator();
+                    let tray_label = if self.hide_tray {
+                        "Show tray icon"
+                    } else {
+                        "Hide tray icon"
+                    };
+                    if ui.small_button(tray_label).clicked() {
+                        self.user_interacted = true;
+                        self.hide_tray = !self.hide_tray;
+                        if self.hide_tray {
+                            self.tray = None;
+                        } else {
+                            self.tray_failed = false;
+                        }
+                        self.command(Command::SetHideTray(self.hide_tray));
+                    }
+                });
+            });
     }
 }
 impl eframe::App for App {
@@ -1740,6 +1785,18 @@ impl eframe::App for App {
             }
         }
         self.update_events(ctx);
+        if let Some(task) = &self.autostart_task
+            && let Ok(result) = task.try_recv()
+        {
+            self.autostart_task = None;
+            match result {
+                Ok(enabled) => {
+                    self.autostart_enabled = enabled;
+                    self.command(Command::MarkAutostartPrompted);
+                }
+                Err(error) => self.status = format!("Autostart failed: {error}"),
+            }
+        }
         ctx.request_repaint_after(Duration::from_millis(100));
         if self.exited || self.exit_at.is_some_and(|t| Instant::now() >= t) {
             self.quitting = true;
@@ -1948,6 +2005,15 @@ impl eframe::App for App {
                 ui.add_space(6.);
             });
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tab, MainTab::Devices, "Devices");
+                ui.selectable_value(&mut self.tab, MainTab::Settings, "Settings");
+            });
+            ui.separator();
+            if self.tab == MainTab::Settings {
+                egui::ScrollArea::vertical().show(ui, |ui| self.show_settings(ctx, ui));
+                return;
+            }
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.);
                 let width = ui.available_width() - 24.;
@@ -1961,7 +2027,6 @@ impl eframe::App for App {
                     self.show_handoff(ui);
                 });
                 ui.add_space(8.);
-                self.show_details(ctx, ui);
             });
         });
         if let Some(c) = self.confirmations.first() {
@@ -2012,10 +2077,7 @@ impl eframe::App for App {
                     );
                     ui.horizontal(|ui| {
                         if ui.button("Enable autostart").clicked() {
-                            match crate::updates::set_autostart(true) {
-                                Ok(()) => self.autostart_enabled = true,
-                                Err(e) => self.status = format!("Autostart failed: {e}"),
-                            }
+                            self.change_autostart(true);
                             close_prompt = true;
                         }
                         if ui.button("Not now").clicked() {

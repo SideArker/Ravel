@@ -7,7 +7,7 @@ See [verification](verification.md) for exactly what has been exercised.
 ## First connection
 
 1. Run `ravel` on each device on the same trusted LAN. Set a preferred name under
-   **Details & troubleshooting**. The default TCP port is 4243; `--port` changes it.
+   **Settings → Startup, tray & updates**. The default TCP port is 4243; `--port` changes it.
 2. In **Find device**, select the discovered peer on each machine, or enter
    `192.168.x.y:4243` if discovery is unavailable. Continue to **PIN**.
 3. On one machine select **Show PIN on this device**. On the other, enter that
@@ -94,8 +94,7 @@ keep pairing and layouts. `--foreground` prevents spawning a detached copy and
 reports a running-instance conflict instead of silently reopening an old build.
 With `RAVEL_DEBUG=1`, the window stays visible on automatic connection. Console
 logs show backend selection, armed edges, connected peers, handoff progress,
-and Sending/Receiving state; they do not log typed keys or PINs. The Details
-panel identifies the app and protocol versions.
+and Sending/Receiving state; they do not log typed keys or PINs. The Settings tab identifies the app and protocol versions.
 
 Without a Rust setup on Windows, open GitHub Actions → **development-builds** →
 **Run workflow**, choose the desired branch, and download `ravel-dev-Windows`
@@ -155,7 +154,7 @@ bindsym Ctrl+Mod1+Shift+Escape exec /absolute/path/to/ravel --stop
 The in-capture chord remains available when shortcut inhibition is active. Verify
 both local stop paths before sharing passwords or using an unattended receiver.
 
-**Unpair selected device** under **Details & troubleshooting** removes the
+**Unpair selected device** under **Settings → Startup, tray & updates** removes the
 selected certificate fingerprint and stops all
 sharing. Revoking on one side prevents reconnection. Re-pair explicitly with a
 new PIN and approvals on both devices if needed. A different fingerprint never
@@ -223,3 +222,33 @@ creates a new identity that must be paired again. Keep backups private.
 The PIN runs audited-library CPace bound to both identities and the TLS session;
 it is never an encryption key or a substitute for fingerprint comparison. Read
 [the protocol/threat model](protocol.md) and [release evidence](verification.md).
+
+
+## Settings and command line maintenance
+
+**Settings** saves local push strength (8–512 motion units) and push timeout
+(250–5000 ms). The defaults remain 96 units and 1500 ms. Lower strength makes
+crossing easier; inward motion reduces accumulated progress. Changes apply to
+the next edge attempt, without re-pairing. Each PC uses its own settings.
+
+```sh
+ravel version
+ravel status
+ravel stop                 # Pause sharing, keep the app running.
+ravel quit                 # Stop sharing and exit.
+ravel autostart enable     # Also supports disable and status.
+ravel uninstall            # --uninstall is an alias.
+```
+
+Uninstall disables startup, shuts down sharing, and removes the installed command,
+launcher and icon (Windows: installed executable, shortcut and user PATH entry).
+It keeps pairing and settings. Linux development symlinks are unlinked without
+deleting their target build. Custom Linux install directories require the same
+`RAVEL_INSTALL_DIR` used when installing. Uninstall currently supports Linux and
+Windows; it does not recursively remove arbitrary directories.
+
+For Linux → Windows failures, run `RAVEL_DEBUG=1 ravel --foreground` after
+`ravel quit`. Push once, then inspect the `[ravel]` lines: armed edge → native
+edge entered → progress → Sending. No edge event points to native capture;
+a rejected edge points to monitor/layout/direction; a timeout points to strength
+or timing. Reaching Sending without remote motion needs Windows-side logs too.

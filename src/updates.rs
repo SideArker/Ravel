@@ -3,9 +3,11 @@ use anyhow::ensure;
 use anyhow::{Context, Result};
 use semver::Version;
 use serde::Deserialize;
+#[cfg(not(target_os = "linux"))]
+use std::path::PathBuf;
 #[cfg(any(target_os = "linux", windows))]
 use std::process::Command;
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 const LATEST_RELEASE: &str = "https://api.github.com/repos/SideArker/Ravel/releases/latest";
 
@@ -149,14 +151,8 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn autostart_path() -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(config.join("autostart").join("ravel.desktop"))
-    }
     #[cfg(windows)]
     {
         let appdata = std::env::var_os("APPDATA").map(PathBuf::from)?;
@@ -186,10 +182,29 @@ fn autostart_path() -> Option<PathBuf> {
 }
 
 pub fn is_autostart_enabled() -> bool {
-    autostart_path().is_some_and(|p| p.is_file())
+    #[cfg(target_os = "linux")]
+    {
+        crate::autostart::enabled()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        autostart_path().is_some_and(|p| p.is_file())
+    }
 }
 
 pub fn set_autostart(enabled: bool) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::autostart::set_enabled(enabled)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        set_platform_autostart(enabled)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_platform_autostart(enabled: bool) -> Result<()> {
     let path = autostart_path().context("Autostart path unavailable on this OS")?;
     if !enabled {
         if path.exists() {
@@ -201,19 +216,6 @@ pub fn set_autostart(enabled: bool) -> Result<()> {
         std::fs::create_dir_all(parent).context("Cannot create autostart directory")?;
     }
     let exe = std::env::current_exe().context("Cannot determine executable path")?;
-
-    #[cfg(target_os = "linux")]
-    {
-        let escaped = exe
-            .to_string_lossy()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let content = format!(
-            "[Desktop Entry]\nType=Application\nName=Ravel\nComment=Share a mouse and keyboard over your LAN\nExec=\"{escaped}\"\nIcon=ravel\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
-        );
-        std::fs::write(&path, content).context("Cannot write autostart desktop entry")?;
-        Ok(())
-    }
 
     #[cfg(windows)]
     {

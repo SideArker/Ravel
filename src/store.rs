@@ -9,6 +9,34 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffSettings {
+    pub push_distance: f64,
+    pub timeout_ms: u64,
+}
+impl Default for HandoffSettings {
+    fn default() -> Self {
+        Self {
+            push_distance: 96.,
+            timeout_ms: 1500,
+        }
+    }
+}
+impl HandoffSettings {
+    pub fn validate(self) -> Result<Self> {
+        ensure!(
+            self.push_distance.is_finite() && (8. ..=512.).contains(&self.push_distance),
+            "Push strength must be between 8 and 512"
+        );
+        ensure!(
+            (250..=5000).contains(&self.timeout_ms),
+            "Push time must be between 250 and 5000 ms"
+        );
+        Ok(self)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustedPeer {
@@ -19,6 +47,8 @@ pub struct TrustedPeer {
 #[serde(deny_unknown_fields)]
 struct Data {
     peers: BTreeMap<String, TrustedPeer>,
+    #[serde(default)]
+    handoff: HandoffSettings,
     #[serde(default)]
     monitor: Option<String>,
     #[serde(default)]
@@ -40,6 +70,7 @@ impl Store {
         } else {
             Data::default()
         };
+        data.handoff.validate()?;
         ensure!(data.peers.len() <= 32, "Too many trusted peers");
         if let Some(id) = &data.monitor {
             validate_monitor_id(id)?;
@@ -56,6 +87,15 @@ impl Store {
     }
     pub fn peers(&self) -> BTreeMap<String, TrustedPeer> {
         self.data.peers.clone()
+    }
+    pub fn handoff_settings(&self) -> HandoffSettings {
+        self.data.handoff
+    }
+    pub fn set_handoff_settings(&mut self, settings: HandoffSettings) -> Result<()> {
+        settings.validate()?;
+        let mut next = self.data.clone();
+        next.handoff = settings;
+        self.save(next)
     }
     pub fn monitor(&self) -> Option<&str> {
         self.data.monitor.as_deref()
@@ -204,6 +244,39 @@ mod tests {
         assert!(!s.trusted(&"cd".repeat(32)));
         s.revoke(&fp).unwrap();
         assert!(!Store::load(dir.path()).unwrap().trusted(&fp));
+    }
+
+    #[test]
+    fn handoff_settings_validate_and_persist_without_changing_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.handoff_settings(), HandoffSettings::default());
+        let fp = "ef".repeat(32);
+        store.trust(fp.clone(), "Keep paired".into()).unwrap();
+        let settings = HandoffSettings {
+            push_distance: 32.,
+            timeout_ms: 2500,
+        };
+        store.set_handoff_settings(settings).unwrap();
+        for invalid in [
+            HandoffSettings {
+                push_distance: f64::NAN,
+                ..settings
+            },
+            HandoffSettings {
+                push_distance: 0.,
+                ..settings
+            },
+            HandoffSettings {
+                timeout_ms: 0,
+                ..settings
+            },
+        ] {
+            assert!(store.set_handoff_settings(invalid).is_err());
+        }
+        let loaded = Store::load(dir.path()).unwrap();
+        assert_eq!(loaded.handoff_settings(), settings);
+        assert!(loaded.trusted(&fp));
     }
 
     #[test]

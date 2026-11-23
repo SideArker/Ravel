@@ -1,5 +1,5 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ravel::{
     gui::App,
     identity,
@@ -40,6 +40,9 @@ fn run() -> Result<()> {
     let mut probe = false;
     let mut smoke = false;
     let mut foreground = false;
+    let mut uninstall = false;
+    let mut status = false;
+    let mut autostart = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -50,23 +53,87 @@ fn run() -> Result<()> {
             }
             "--name" => name = Some(args.next().context("--name needs a device name")?),
             "--port" => port = args.next().context("--port needs a number")?.parse()?,
-            "--stop" => stop = true,
-            "--kill-all" => kill_all = true,
+            "--stop" | "stop" => stop = true,
+            "--kill-all" | "quit" => kill_all = true,
             "--probe-backend" => probe = true,
             "--smoke-gui" => smoke = true,
             "--foreground" => foreground = true,
+            "--uninstall" | "uninstall" => uninstall = true,
+            "--status" | "status" => status = true,
+            "autostart" | "--autostart" => {
+                autostart = Some(
+                    args.next()
+                        .context("Use: ravel autostart enable|disable|status")?,
+                )
+            }
+            "--version" | "-V" | "version" => {
+                println!(
+                    "Ravel {} (protocol {})",
+                    env!("CARGO_PKG_VERSION"),
+                    ravel::protocol::VERSION
+                );
+                return Ok(());
+            }
             "--help" | "-h" => {
                 println!(
-                    "Ravel — LAN mouse & keyboard sharing\n\nOptions: --name NAME --port PORT --state-dir PATH --stop --kill-all --probe-backend --smoke-gui --foreground\nSee README.md and docs/operation.md for pairing, backends and stop bindings."
+                    "Ravel — LAN mouse & keyboard sharing\n\nCommands: status, stop, quit, uninstall, autostart enable|disable|status\n\nOptions: --version --uninstall --name NAME --port PORT --state-dir PATH --stop --kill-all --probe-backend --smoke-gui --foreground\nSee README.md and docs/operation.md for pairing, backends and stop bindings."
                 );
                 return Ok(());
             }
             _ => bail!("Unknown option: {arg}"),
         }
     }
+    ensure!(
+        [
+            stop,
+            kill_all,
+            probe,
+            smoke,
+            uninstall,
+            status,
+            autostart.is_some()
+        ]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count()
+            <= 1,
+        "Choose one command at a time"
+    );
     let directory = directory
         .map(Ok)
         .unwrap_or_else(identity::default_directory)?;
+    if uninstall {
+        return ravel::maintenance::uninstall(&directory);
+    }
+    if let Some(action) = autostart {
+        match action.as_str() {
+            "enable" => ravel::updates::set_autostart(true)?,
+            "disable" => ravel::updates::set_autostart(false)?,
+            "status" => {}
+            _ => bail!("Use: ravel autostart enable|disable|status"),
+        }
+        println!(
+            "Autostart: {}",
+            if ravel::updates::is_autostart_enabled() {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        return Ok(());
+    }
+    if status {
+        println!(
+            "Ravel {} (protocol {})\nRunning: {}\nAutostart: {}\nBinary: {}\nState: {}",
+            env!("CARGO_PKG_VERSION"),
+            ravel::protocol::VERSION,
+            runtime::is_running(&directory)?,
+            ravel::updates::is_autostart_enabled(),
+            std::env::current_exe()?.display(),
+            directory.display()
+        );
+        return Ok(());
+    }
     if stop {
         return runtime::request_stop(&directory);
     }
@@ -130,6 +197,10 @@ fn run() -> Result<()> {
             use winit::platform::x11::EventLoopBuilderExtX11;
             builder.with_x11();
         }));
+    } else {
+        // Hyprland may stop frame callbacks for offscreen windows. Waiting for
+        // vsync then blocks EGL swap and prevents the GUI from handling events.
+        options.vsync = false;
     }
     eframe::run_native(
         "Ravel",

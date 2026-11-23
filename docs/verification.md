@@ -1,5 +1,61 @@
 # Implementation evidence and release gates
 
+## 2026-11-23 working checkpoint, settings and Linux session support
+
+The user confirmed the `e49f883` development build restores physical mouse
+sharing. Before further changes, its executable and matching private
+`peers.json` were copied to
+`~/.local/share/ravel-build-backups/working-e49f883/`, and the local tag
+`checkpoint-working-handoff-e49f883` was created. No release tag was created.
+Restoring the old executable also requires its matching `peers.json`: the new
+local handoff settings field is intentionally rejected by the older strict reader.
+Stop both copies before restoring; keep any newer configuration backup too.
+
+The 0.5.3-dev candidate adds a Settings tab with validated, atomically saved
+push strength and timeout. Defaults remain 96 units / 1500 ms, transfer modes
+and protocol 5 are unchanged. Tests cover old config defaults, invalid values,
+trust preservation, configured gate strength/expiry and worker command handling.
+Invalid settings do not terminate the worker.
+
+On this host, an isolated native Wayland window repeatedly stopped dispatching
+compositor pings after being moved offscreen. GDB showed its main thread blocked
+inside EGL `SwapBuffers`; sharing runs on a separate worker. Disabling vsync
+for the native Wayland GUI restored dispatch. The repeatable native check is:
+
+```sh
+python3 tests/hyprland-ui.py /absolute/path/to/ravel
+```
+
+It uses empty temporary state, moves only its own window, keeps only ping/pong
+messages, and cleans up its child. It requires Hyprland 0.57+ and a live session.
+The checkpoint fails this 30-second check; the candidate answers pings throughout.
+The old executable dispatched one ping/reply before stalling; the candidate
+answered 20 pings in the saved check. This checks the reported offscreen stall,
+not every possible UI hang.
+
+Linux startup now uses a systemd user service instead of relying on an XDG
+autostart desktop entry that this Hyprland session did not launch. The real host
+previously reported `ravel.service` as not found; it now reports enabled, and
+`systemd-analyze --user verify` passes. Next-login execution still needs a login
+check. Startup changes run outside the UI thread.
+
+CLI aliases cover version, status, stop, quit, startup and uninstall. The Linux
+uninstall test preserves state, unrelated files and development symlink targets.
+An actual uninstall is deliberately not performed on the user's installation.
+
+Linux-physical-mouse → Windows entry remains unconfirmed: the configured edge
+is Left and its layer is armed, and saved transfer mode is Both. The existing
+hub regression passes with simulated capture. Debug logs now distinguish native
+edge entry, rejected layout/monitor matching, push progress and timeout. Physical
+capture and Windows receiver logs from the failing attempt are still needed;
+no speculative native input change was made for this symptom.
+
+Local gates passed: 72 tests (three existing opt-in checks ignored), Clippy with
+warnings denied, formatting, debug build, CLI version/help/status and conflict
+checks. Windows-only uninstall script syntax is checked by its native test;
+real removal is not invoked by the test.
+
+
 ## 2026-11-23 single-peer hub regression and development testing
 
 A deterministic single-peer regression failed on the v0.5.1 code: a peer was

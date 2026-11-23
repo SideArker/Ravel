@@ -1,8 +1,11 @@
+#[cfg(target_os = "linux")]
+pub mod autostart;
 pub mod discovery;
 pub mod geometry;
 pub mod gui;
 pub mod identity;
 pub mod input;
+pub mod maintenance;
 pub mod pairing;
 pub mod protocol;
 pub mod runtime;

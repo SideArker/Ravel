@@ -48,12 +48,14 @@ pub enum Command {
     },
     SetName(String),
     SetHideTray(bool),
+    SetHandoffSettings(crate::store::HandoffSettings),
     MarkAutostartPrompted,
     TakeControl,
 }
 pub enum Event {
     Show,
     Name(String),
+    HandoffSettings(crate::store::HandoffSettings),
     Preferences {
         hide_tray: bool,
         autostart_prompted: bool,
@@ -310,6 +312,9 @@ async fn work(
     let port = listener.local_addr()?.port();
     let server = tls::server(&ctx.identity)?;
     ctx.trusted_update();
+    ctx.send_event(Event::HandoffSettings(
+        ctx.store.borrow().handoff_settings(),
+    ));
     ctx.send_event(Event::Preferences {
         hide_tray: initial_hide_tray,
         autostart_prompted: initial_autostart_prompted,
@@ -500,6 +505,14 @@ async fn work(
                                 },
                                 Err(e)=>ctx.status(format!("Name saved, but discovery is unavailable: {e}")),
                             }
+                        }
+                        result
+                    },
+                    Command::SetHandoffSettings(settings)=>{
+                        let result = ctx.store.borrow_mut().set_handoff_settings(settings);
+                        if result.is_ok() {
+                            ctx.send_event(Event::HandoffSettings(settings));
+                            ctx.status("Handoff settings saved; apply to the next edge push");
                         }
                         result
                     },
@@ -887,6 +900,20 @@ fn control(ctx: &Context, stream: TlsStream<TcpStream>, fp: String, initiator: b
         .map_err(|_| anyhow!("Control hub busy"))
 }
 
+pub fn is_running(directory: &std::path::Path) -> Result<bool> {
+    let path = directory.join("instance.lock");
+    if !path.try_exists()? {
+        return Ok(false);
+    }
+    crate::identity::validate_private(&path)?;
+    let lock = std::fs::File::open(path)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn request_stop(directory: &std::path::Path) -> Result<()> {
     request_control(directory, "stop.request")
 }
@@ -991,6 +1018,45 @@ mod tests {
         drop(lock);
         assert!(request_shutdown(directory.path()).is_err());
         assert!(!directory.path().join("shutdown.request").exists());
+    }
+
+    #[tokio::test]
+    async fn handoff_settings_command_survives_invalid_values_and_saves_valid_values() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(!is_running(directory.path()).unwrap());
+        let mut worker =
+            Worker::start(directory.path().to_owned(), "Settings test".into(), 0, None).unwrap();
+        assert!(is_running(directory.path()).unwrap());
+        let settings = crate::store::HandoffSettings {
+            push_distance: 32.,
+            timeout_ms: 2500,
+        };
+        worker
+            .command(Command::SetHandoffSettings(crate::store::HandoffSettings {
+                push_distance: f64::NAN,
+                ..settings
+            }))
+            .unwrap();
+        worker
+            .command(Command::SetHandoffSettings(settings))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match worker.events.recv().await.expect("Worker stopped") {
+                    Event::HandoffSettings(value) if value == settings => break,
+                    Event::Exited(error) => panic!("Invalid settings terminated worker: {error:?}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(worker);
+        assert!(!is_running(directory.path()).unwrap());
+        assert_eq!(
+            Store::load(directory.path()).unwrap().handoff_settings(),
+            settings
+        );
     }
 
     pub(super) fn context(name: &str) -> (tempfile::TempDir, Rc<Context>, mpsc::Receiver<Event>) {
