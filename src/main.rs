@@ -179,25 +179,18 @@ fn start_or_show_daemon(directory: &Path) -> Result<()> {
 fn default_device_name() -> String {
     let raw = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
-        .or_else(|_| {
-            #[cfg(unix)]
-            {
-                let mut buf = [0u8; 256];
-                let res = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
-                if res == 0 {
-                    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-                    if let Ok(s) = std::str::from_utf8(&buf[..len]) {
-                        return Ok(s.to_owned());
-                    }
-                }
-                Err(())
-            }
-            #[cfg(not(unix))]
-            {
-                Err(())
-            }
-        });
-    if let Ok(raw) = raw {
+        .ok();
+    #[cfg(unix)]
+    let raw = raw.or_else(|| {
+        let mut buf = [0u8; 256];
+        let res = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+        if res == 0 {
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            return std::str::from_utf8(&buf[..len]).ok().map(str::to_owned);
+        }
+        None
+    });
+    if let Some(raw) = raw {
         let cleaned: String = raw
             .trim()
             .chars()
