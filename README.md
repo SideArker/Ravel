@@ -23,7 +23,7 @@
   - **Linux Wayland (wlroots / Hyprland / Sway):** `wlr-layer-shell` edge capture + virtual keyboard & pointer.
   - **Linux Wayland (GNOME / KDE Plasma):** XDG `InputCapture` + `RemoteDesktop` (libei / EIS) portals.
   - **Linux X11:** Native X11 grabs + `XTest` + `RandR` monitor geometry.
-  - **Windows:** Low-level input hooks (`WH_MOUSE_LL` / `WH_KEYBOARD_LL`) + `SendInput`.
+  - **Windows:** Raw Input mouse motion, low-level button/keyboard hooks, and `SendInput`.
   - **macOS:** Core Graphics event taps + event posting.
 
 ---
@@ -33,7 +33,7 @@
 On Windows (and occasionally other heuristic security scanners), `ravel.exe` may be flagged as a **RAT (Remote Access Trojan)**, **Keylogger**, or **PUA / Unknown Publisher**. **This is a false positive.**
 
 ### Why does this happen?
-1. **Global input hooks & synthetic input APIs:** To capture your mouse and keyboard when you cross the screen edge on one PC and move the cursor/type on another PC, Ravel *must* call Windows' `SetWindowsHookExW(WH_KEYBOARD_LL / WH_MOUSE_LL)` and `SendInput` APIs. Heuristic antivirus engines flag any program that combines keyboard hooks with network sockets because remote administration tools use those exact same OS APIs.
+1. **Global input APIs:** To capture your mouse and keyboard when you cross the screen edge on one PC and move the cursor/type on another PC, Ravel uses Windows Raw Input, `SetWindowsHookExW(WH_KEYBOARD_LL / WH_MOUSE_LL)`, and `SendInput`. Heuristic antivirus engines flag programs that combine keyboard hooks with network sockets because remote administration tools use those same OS APIs.
 2. **Unsigned community binaries:** Commercial Extended Validation (EV) code-signing certificates cost hundreds of dollars per year. Because Ravel's prebuilt release binaries are currently unsigned, Windows SmartScreen and Defender apply aggressive heuristic rules by default.
 
 ### How Ravel is architected for safety (and why it is NOT a RAT)

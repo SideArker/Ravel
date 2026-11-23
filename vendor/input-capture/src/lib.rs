@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Display,
-    mem::swap,
     task::{ready, Poll},
 };
 
@@ -24,6 +23,11 @@ mod macos;
 
 #[cfg(windows)]
 mod windows;
+
+#[cfg(windows)]
+pub fn windows_fullscreen_focused() -> bool {
+    windows::fullscreen_focused()
+}
 
 /// fallback input capture (does not produce events)
 mod dummy;
@@ -234,49 +238,33 @@ impl Stream for InputCapture {
             return Poll::Ready(Some(Ok(e)));
         }
 
-        // ready
-        let event = ready!(self.capture.poll_next_unpin(cx));
+        loop {
+            // An event from a recently removed edge must not strand newer events.
+            let event = match ready!(self.capture.poll_next_unpin(cx)) {
+                Some(Ok(event)) => event,
+                Some(Err(error)) => return Poll::Ready(Some(Err(error))),
+                None => return Poll::Ready(None),
+            };
+            let (pos, event) = event;
+            if !self.position_map.contains_key(&pos) {
+                continue;
+            }
 
-        // stream closed
-        let event = match event {
-            Some(e) => e,
-            None => return Poll::Ready(None),
-        };
+            if let CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, state, .. })) =
+                event
+            {
+                self.update_pressed_keys(key, state);
+            }
 
-        // error occurred
-        let (pos, event) = match event {
-            Ok(e) => e,
-            Err(e) => return Poll::Ready(Some(Err(e))),
-        };
-
-        // handle key presses
-        if let CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, state, .. })) = event {
-            self.update_pressed_keys(key, state);
-        }
-
-        let len = self
-            .position_map
-            .get(&pos)
-            .map(|ids| ids.len())
-            .unwrap_or(0);
-
-        match len {
-            0 => Poll::Pending,
-            1 => Poll::Ready(Some(Ok((
-                self.position_map.get(&pos).expect("no id")[0],
-                event,
-            )))),
-            _ => {
-                let mut position_map = HashMap::new();
-                swap(&mut self.position_map, &mut position_map);
-                {
-                    for &id in position_map.get(&pos).expect("position") {
+            let ids = self.position_map.get(&pos).expect("position").clone();
+            match ids.as_slice() {
+                [id] => return Poll::Ready(Some(Ok((*id, event)))),
+                ids => {
+                    for &id in ids {
                         self.pending.push_back((id, event));
                     }
+                    return Poll::Ready(Some(Ok(self.pending.pop_front().expect("event"))));
                 }
-                swap(&mut self.position_map, &mut position_map);
-
-                Poll::Ready(Some(Ok(self.pending.pop_front().expect("event"))))
             }
         }
     }
@@ -361,4 +349,55 @@ async fn create(
         }
     }
     Err(CaptureCreationError::NoAvailableBackend)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{pin::Pin, task::Context};
+
+    struct QueuedCapture(VecDeque<(Position, CaptureEvent)>);
+
+    impl Stream for QueuedCapture {
+        type Item = Result<(Position, CaptureEvent), CaptureError>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.0.pop_front().map(Ok))
+        }
+    }
+
+    #[async_trait]
+    impl Capture for QueuedCapture {
+        async fn create(&mut self, _: Position) -> Result<(), CaptureError> {
+            Ok(())
+        }
+        async fn destroy(&mut self, _: Position) -> Result<(), CaptureError> {
+            Ok(())
+        }
+        async fn release(&mut self) -> Result<(), CaptureError> {
+            Ok(())
+        }
+        async fn terminate(&mut self) -> Result<(), CaptureError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn removed_edge_event_does_not_stall_new_edge() {
+        let mut capture = InputCapture {
+            capture: Box::new(QueuedCapture(VecDeque::from([
+                (Position::Left, CaptureEvent::Begin { point: [0., 10.] }),
+                (Position::Right, CaptureEvent::Begin { point: [99., 10.] }),
+            ]))),
+            pressed_keys: HashSet::new(),
+            position_map: HashMap::new(),
+            id_map: HashMap::new(),
+            pending: VecDeque::new(),
+        };
+        capture.create(7, Position::Right).await.unwrap();
+        let Poll::Ready(Some(Ok(event))) = futures::poll!(capture.next()) else {
+            panic!("valid edge event was left pending after a removed edge event");
+        };
+        assert_eq!(event, (7, CaptureEvent::Begin { point: [99., 10.] }));
+    }
 }

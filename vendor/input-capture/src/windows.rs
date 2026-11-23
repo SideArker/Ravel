@@ -12,6 +12,8 @@ use super::{Capture, CaptureError, CaptureEvent, Position};
 mod display_util;
 mod event_thread;
 
+pub(crate) use event_thread::fullscreen_focused;
+
 pub struct WindowsInputCapture {
     event_rx: Receiver<(Position, CaptureEvent)>,
     event_thread: EventThread,
@@ -56,6 +58,12 @@ impl WindowsInputCapture {
 impl Stream for WindowsInputCapture {
     type Item = Result<(Position, CaptureEvent), CaptureError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if event_thread::FULLSCREEN_BLOCKED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return Poll::Ready(Some(Err(std::io::Error::other(
+                "Sharing stopped: a fullscreen app is focused",
+            )
+            .into())));
+        }
         if event_thread::OVERFLOW.swap(false, std::sync::atomic::Ordering::AcqRel) {
             return Poll::Ready(Some(Err(std::io::Error::other(
                 "Input capture queue overflow",

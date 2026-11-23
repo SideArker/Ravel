@@ -9,20 +9,26 @@ use std::thread;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{FALSE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{FALSE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayDevicesW, EnumDisplaySettingsW, DEVMODEW, DISPLAY_DEVICEW,
-    DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, ENUM_CURRENT_SETTINGS,
+    EnumDisplayDevicesW, EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromWindow, DEVMODEW,
+    DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, ENUM_CURRENT_SETTINGS, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Input::{
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT,
+    RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEMOUSE,
+};
 
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DispatchMessageW, GetMessageW, PostThreadMessageW,
-    RegisterClassW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+    GetDesktopWindow, GetForegroundWindow, GetMessageW, GetShellWindow, GetWindowRect,
+    PostThreadMessageW, RegisterClassW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
     EDD_GET_DEVICE_INTERFACE_NAME, HHOOK, HOOKPROC, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
     LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_STYLE,
-    WM_DISPLAYCHANGE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_DISPLAYCHANGE, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
     WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
     WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WNDPROC,
 };
@@ -115,6 +121,7 @@ enum ClientUpdate {
     Target([i32; 4]),
 }
 
+pub(super) static FULLSCREEN_BLOCKED: AtomicBool = AtomicBool::new(false);
 pub(super) static OVERFLOW: AtomicBool = AtomicBool::new(false);
 fn blocking_send_event(pos: Position, event: CaptureEvent) {
     let _ = try_send_event(pos, event);
@@ -139,10 +146,6 @@ thread_local! {
     static ACTIVE_CLIENT: Cell<Option<Position>> = const { Cell::new(None) };
     /// input event channel
     static EVENT_TX: RefCell<Option<Sender<(Position, CaptureEvent)>>> = const { RefCell::new(None) };
-    /// position of barrier entry
-    static ENTRY_POINT: Cell<(i32, i32)> = const { Cell::new((0, 0)) };
-    /// previous mouse position
-    static PREV_POS: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
     /// displays and generation counter
     static DISPLAYS: RefCell<(Vec<RECT>, i32)> = const { RefCell::new((Vec::new(), 0)) };
     static TARGET: Cell<Option<[i32; 4]>> = const { Cell::new(None) };
@@ -226,7 +229,7 @@ fn start_routine(
     }
 
     /* window is used ro receive WM_DISPLAYCHANGE messages */
-    unsafe {
+    let window = unsafe {
         CreateWindowExW(
             Default::default(),
             w!("lan-mouse-message-window-class"),
@@ -240,6 +243,17 @@ fn start_routine(
             None,
             Some(instance),
             None,
+        )?
+    };
+    unsafe {
+        RegisterRawInputDevices(
+            &[RAWINPUTDEVICE {
+                usUsagePage: 1,
+                usUsage: 2,
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: window,
+            }],
+            std::mem::size_of::<RAWINPUTDEVICE>() as u32,
         )?;
     }
 
@@ -280,81 +294,34 @@ fn start_routine(
             }
         }
     }
+    unsafe {
+        let _ = RegisterRawInputDevices(
+            &[RAWINPUTDEVICE {
+                usUsagePage: 1,
+                usUsage: 2,
+                dwFlags: RIDEV_REMOVE,
+                ..Default::default()
+            }],
+            std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+        );
+        let _ = DestroyWindow(window);
+    }
     Ok(())
-}
-
-fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
-    if wparam.0 != WM_MOUSEMOVE as usize {
-        return ACTIVE_CLIENT.get().is_some();
-    }
-    let mouse_low_level: MSLLHOOKSTRUCT = unsafe { *(lparam.0 as *const MSLLHOOKSTRUCT) };
-    let curr_pos = (mouse_low_level.pt.x, mouse_low_level.pt.y);
-    let prev_pos = PREV_POS.get().unwrap_or(curr_pos);
-    PREV_POS.replace(Some(curr_pos));
-
-    /* next event is the first actual event */
-    let ret = ACTIVE_CLIENT.get().is_some();
-
-    /* client already active, no need to check */
-    if ACTIVE_CLIENT.get().is_some() {
-        return ret;
-    }
-
-    /* check if a client was activated */
-    let entered = DISPLAYS.with_borrow_mut(|(displays, generation)| {
-        update_display_regions(displays, generation);
-        display_util::entered_barrier(prev_pos, curr_pos, displays)
-    });
-
-    let Some(pos) = entered else {
-        return ret;
-    };
-
-    if !TARGET.get().is_none_or(|[x, y, w, h]| {
-        prev_pos.0 >= x && prev_pos.0 < x + w && prev_pos.1 >= y && prev_pos.1 < y + h
-    }) {
-        return ret;
-    }
-
-    /* check if a client is registered for the barrier */
-    if !CLIENTS.with_borrow(|clients| clients.contains(&pos)) {
-        return ret;
-    }
-
-    /* update active client and entry point */
-    ACTIVE_CLIENT.replace(Some(pos));
-    let entry_point = DISPLAYS.with_borrow(|(displays, _)| {
-        display_util::clamp_to_display_bounds(displays, prev_pos, curr_pos)
-    });
-    ENTRY_POINT.replace(entry_point);
-
-    /* notify main thread */
-    let active = ACTIVE_CLIENT.get().expect("active client");
-    blocking_send_event(
-        active,
-        CaptureEvent::Begin {
-            point: [entry_point.0 as f64, entry_point.1 as f64],
-        },
-    );
-
-    ret
 }
 
 unsafe extern "system" fn mouse_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if ncode < 0 || (*(lparam.0 as *const MSLLHOOKSTRUCT)).flags & LLMHF_INJECTED != 0 {
         return CallNextHookEx(None, ncode, wparam, lparam);
     }
-    let active = check_client_activation(wparam, lparam);
-
     /* no client was active */
-    if !active {
-        return CallNextHookEx(None, ncode, wparam, lparam);
-    }
-
-    /* get active client if any */
     let Some(pos) = ACTIVE_CLIENT.get() else {
-        return LRESULT(1);
+        return CallNextHookEx(None, ncode, wparam, lparam);
     };
+
+    // Motion comes from Raw Input so it continues past the desktop edge.
+    if wparam.0 == WM_MOUSEMOVE as usize {
+        return LRESULT(1);
+    }
 
     /* convert to lan-mouse event */
     let Some(pointer_event) = to_mouse_event(wparam, lparam) else {
@@ -397,16 +364,113 @@ unsafe extern "system" fn kybrd_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM)
 }
 
 unsafe extern "system" fn window_proc(
-    _hwnd: HWND,
+    hwnd: HWND,
     uint: u32,
-    _wparam: WPARAM,
-    _lparam: LPARAM,
+    wparam: WPARAM,
+    lparam: LPARAM,
 ) -> LRESULT {
-    if uint == WM_DISPLAYCHANGE {
+    if uint == WM_INPUT {
+        raw_mouse_motion(lparam);
+    } else if uint == WM_DISPLAYCHANGE {
         log::debug!("display resolution changed");
         DISPLAY_RESOLUTION_GENERATION.fetch_add(1, Ordering::Release);
     }
-    LRESULT(1)
+    DefWindowProcW(hwnd, uint, wparam, lparam)
+}
+
+pub(crate) fn fullscreen_focused() -> bool {
+    unsafe {
+        let window = GetForegroundWindow();
+        if window.0.is_null() || window == GetDesktopWindow() || window == GetShellWindow() {
+            return false;
+        }
+        let mut rect = RECT::default();
+        let mut monitor = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetWindowRect(window, &mut rect).is_ok()
+            && GetMonitorInfoW(
+                MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+                &mut monitor,
+            )
+            .as_bool()
+            && display_util::covers_monitor(&rect, &monitor.rcMonitor)
+    }
+}
+
+fn raw_mouse_motion(lparam: LPARAM) {
+    // Check before activation so games never lose their local mouse/keyboard hooks.
+    if fullscreen_focused() {
+        if ACTIVE_CLIENT.take().is_some() {
+            FULLSCREEN_BLOCKED.store(true, Ordering::Release);
+        }
+        return;
+    }
+
+    let mut raw = RAWINPUT::default();
+    let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+    let bytes = unsafe {
+        GetRawInputData(
+            HRAWINPUT(lparam.0 as *mut _),
+            RID_INPUT,
+            Some((&mut raw as *mut RAWINPUT).cast()),
+            &mut size,
+            std::mem::size_of::<RAWINPUTHEADER>() as u32,
+        )
+    };
+    if bytes == u32::MAX {
+        ACTIVE_CLIENT.take();
+        OVERFLOW.store(true, Ordering::Release);
+        return;
+    }
+    if raw.header.dwType != RIM_TYPEMOUSE.0 {
+        return;
+    }
+    let mouse = unsafe { raw.data.mouse };
+    if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 || (mouse.lLastX == 0 && mouse.lLastY == 0) {
+        return;
+    }
+    let pos = if let Some(pos) = ACTIVE_CLIENT.get() {
+        pos
+    } else {
+        let mut point = POINT::default();
+        if unsafe { GetCursorPos(&mut point) }.is_err() {
+            return;
+        }
+        let point = (point.x, point.y);
+        if !TARGET.get().is_none_or(|[x, y, w, h]| {
+            point.0 >= x && point.0 < x + w && point.1 >= y && point.1 < y + h
+        }) {
+            return;
+        }
+        let entered = DISPLAYS.with_borrow_mut(|(displays, generation)| {
+            update_display_regions(displays, generation);
+            display_util::entered_barrier(point, (mouse.lLastX, mouse.lLastY), displays)
+        });
+        let Some(pos) = entered else {
+            return;
+        };
+        if !CLIENTS.with_borrow(|clients| clients.contains(&pos)) {
+            return;
+        }
+        ACTIVE_CLIENT.set(Some(pos));
+        blocking_send_event(
+            pos,
+            CaptureEvent::Begin {
+                point: [point.0 as f64, point.1 as f64],
+            },
+        );
+        pos
+    };
+    blocking_send_event(
+        pos,
+        CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
+            time: 0,
+            dx: mouse.lLastX as f64,
+            dy: mouse.lLastY as f64,
+        })),
+    );
 }
 
 static DISPLAY_RESOLUTION_GENERATION: AtomicI32 = AtomicI32::new(1);
@@ -448,6 +512,7 @@ fn enumerate_displays(display_rects: &mut Vec<RECT>) {
             );
             if ret == FALSE {
                 log::warn!("no display mode");
+                continue;
             }
 
             let pos = dev_mode.Anonymous1.Anonymous2.dmPosition;
@@ -552,13 +617,6 @@ fn to_mouse_event(wparam: WPARAM, lparam: LPARAM) -> Option<PointerEvent> {
             button: BTN_RIGHT,
             state: 0,
         }),
-        WPARAM(p) if p == WM_MOUSEMOVE as usize => {
-            let (x, y) = (mouse_low_level.pt.x, mouse_low_level.pt.y);
-            let (ex, ey) = ENTRY_POINT.get();
-            let (dx, dy) = (x - ex, y - ey);
-            let (dx, dy) = (dx as f64, dy as f64);
-            Some(PointerEvent::Motion { time: 0, dx, dy })
-        }
         WPARAM(p) if p == WM_MOUSEWHEEL as usize => Some(PointerEvent::AxisDiscrete120 {
             axis: 0,
             value: -(mouse_low_level.mouseData as i32 >> 16),

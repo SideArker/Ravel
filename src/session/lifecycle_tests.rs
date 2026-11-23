@@ -18,7 +18,7 @@ impl Session {
         self.capture
             .send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
                 time: 0,
-                dx: 50.,
+                dx: 100.,
                 dy: 0.,
             })))
             .await
@@ -369,7 +369,7 @@ async fn edge_touch_without_enough_outward_motion_does_not_switch() {
             }).await;
             assert!(premature.is_err(), "Edge touch transferred control too early");
             session.capture.send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
-                time: 1, dx: 28., dy: 0.,
+                time: 1, dx: 76., dy: 0.,
             }))).await.unwrap();
             loop {
                 match protocol::read(&mut session.peer).await.unwrap() {
@@ -830,7 +830,7 @@ async fn hub_supports_multiple_peers_and_live_layout_updates() {
             capture
                 .send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion {
                     time: 0,
-                    dx: -50.,
+                    dx: -100.,
                     dy: 0.,
                 })))
                 .await

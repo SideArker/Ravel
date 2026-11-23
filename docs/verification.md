@@ -1,5 +1,38 @@
 # Implementation evidence and release gates
 
+## 2026-11-23 v0.5.1 handoff safeguards
+
+The outward push requirement is now 96 motion units within 1.5 seconds on all
+backends. Session tests cover insufficient motion, inward motion reducing the
+push, successful transfer, multiple peers, and the authenticated input stream.
+The animation removal did not remove this gate.
+
+Windows now reads relative mouse motion through Raw Input, so outward movement
+continues at the last desktop pixel. Geometry tests cover all four edges,
+negative origins, and adjacent monitors. Stale monitor selections fall back to
+an active output and are saved; invalid interior handoff edges are reported.
+Tray menu actions use stable IDs across recreation and wake hidden Windows GUIs.
+A removed capture edge no longer leaves newer capture events pending.
+
+Fullscreen protection covers Windows foreground windows spanning their monitor
+and native X11 windows advertising `_NET_WM_STATE_FULLSCREEN`. Capture is
+blocked before activation; maintenance stops active connections, and incoming
+mouse motion is refused. The isolated Xvfb lifecycle check passed fullscreen
+blocking, resuming capture after fullscreen clears, and releasing held keys,
+buttons, and grabs even while fullscreen is active. It uses synthetic EWMH
+properties rather than a real game or window manager. Windows rectangle tests
+are included in native CI; physical Windows game behavior still needs QA.
+
+Linux checks passed: workspace tests (63 passed; three opt-in checks skipped),
+the separate vendored capture regression, Clippy with warnings denied, formatting,
+installer checks, and the isolated X11 lifecycle check. The opt-in LAN multicast
+and GitHub update checks were not run. Release builds and native CI are tracked
+in GitHub Actions for this version.
+
+Wayland/macOS fullscreen detection and physical two-PC interoperability are not
+covered by this release's checks. The exact earlier user-reported failure was
+not reproduced; the fixes address concrete failure mechanisms found in code.
+
 ## 2026-11-15 background GUI correction
 
 Plain `ravel` now spawns a detached process containing the GUI and network worker.

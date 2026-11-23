@@ -23,7 +23,7 @@ See [verification](verification.md) for exactly what has been exercised.
    if needed and choose **Save handoff edge**. Then choose **Start sharing** on the receiving
    device and **Connect to device** on the initiating device. Connecting also
    allows sharing locally.
-6. Push outward through the configured edge until the handoff indicator fills.
+6. Push outward through the configured edge by 96 motion units within 1.5 seconds until the handoff indicator fills. Moving inward reduces the accumulated push.
    Mouse and keyboard input then go to the other device. Both devices can be the
    sender; the header shows which device currently controls the other. The
    receiving device can press **Take control on this device** to return control
@@ -61,6 +61,17 @@ calibration; they have not been certified. The OS continues to handle movement
 between local monitors. Ravel captures only the selected monitor's handoff edge;
 the selected monitor must be at the outer edge in the chosen direction. A monitor
 change takes effect on the next connection.
+
+## Fullscreen applications
+
+On Windows and native X11, a focused fullscreen app blocks edge capture. If one
+becomes focused during sharing, Ravel stops the connection and releases held
+input. Incoming mouse movement is also refused while fullscreen is focused.
+Reconnect after leaving fullscreen. Windows detects a foreground window covering
+its monitor (including borderless games); X11 uses the window manager's
+`_NET_WM_STATE_FULLSCREEN` flag. Games that do not expose fullscreen this way
+still require manual disconnect. Wayland and macOS fullscreen detection is not
+implemented; disconnect sharing before gaming on those platforms.
 
 ## Stop and revoke
 
@@ -106,7 +117,7 @@ inherits trust from a matching name or address.
 | --- | --- | --- |
 | Hyprland / Sway-class Wayland | layer-shell capture; wlroots virtual keyboard/pointer | Needs layer-shell v3+, relative-pointer, pointer-constraints, xdg-output, shortcuts-inhibit, virtual-keyboard, virtual-pointer, seat v7+, local XKB keymap. Native constructor tested on Hyprland 0.56.2. Full physical input/handoff not yet certified. |
 | Native X11 | X11 grabs; XTest injection; RandR geometry | Requires XTest and RandR 1.5 and a usable DISPLAY/Xauthority. Multi-monitor handoff requires native testing; isolated Xvfb covers one monitor. Xwayland is deliberately rejected. |
-| Windows | low-level hooks; SendInput | Multi-monitor handoff requires native Windows validation. Standard desktop only; elevated apps and UAC/secure desktops are unsupported. Windows key repeat currently uses a fixed 500 ms delay/32 ms interval. |
+| Windows | Raw Input motion; low-level button/keyboard hooks; SendInput | Multi-monitor handoff requires native Windows validation. Standard desktop only; elevated apps and UAC/secure desktops are unsupported. Windows key repeat currently uses a fixed 500 ms delay/32 ms interval. |
 | GNOME/KDE Plasma Wayland | InputCapture portal edge barriers and libei capture; RemoteDesktop portal and EIS injection | Requires InputCapture keyboard/pointer capabilities and RemoteDesktop v2 with ConnectToEIS. The compositor asks for separate capture and injection permissions; denial is shown by **Check input backend**. Native GNOME and Plasma QA is pending. A portal barrier becomes active only when the compositor detects crossing. |
 | macOS | Core Graphics event tap and event posting | Requires Accessibility, Input Monitoring, and Input Control permissions. The constructor reports denied permissions; after granting them, relaunch Ravel. Native CI build and tests passed; signing and physical input QA are pending. |
 

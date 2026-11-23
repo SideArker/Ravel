@@ -11,7 +11,7 @@ use x11rb::{
     protocol::{
         Event,
         randr::ConnectionExt as _,
-        xproto::{self, ConnectionExt as _, EventMask, GrabMode, GrabStatus},
+        xproto::{self, AtomEnum, ConnectionExt as _, EventMask, GrabMode, GrabStatus},
         xtest::ConnectionExt as _,
     },
     rust_connection::RustConnection,
@@ -92,6 +92,47 @@ impl X11 {
     pub fn monitors(&self) -> Vec<Monitor> {
         self.monitors.clone()
     }
+    pub fn fullscreen_focused(&self) -> Result<bool> {
+        let atom =
+            |name: &[u8]| -> Result<u32> { Ok(self.conn.intern_atom(false, name)?.reply()?.atom) };
+        let active = self
+            .conn
+            .get_property(
+                false,
+                self.root,
+                atom(b"_NET_ACTIVE_WINDOW")?,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )?
+            .reply()?;
+        let Some(window) = active
+            .value32()
+            .and_then(|mut values| values.next())
+            .filter(|&w| w != 0)
+        else {
+            return Ok(false);
+        };
+        // Focus can change while querying; a destroyed window is no longer fullscreen.
+        let Ok(state) = self
+            .conn
+            .get_property(
+                false,
+                window,
+                atom(b"_NET_WM_STATE")?,
+                AtomEnum::ATOM,
+                0,
+                1024,
+            )?
+            .reply()
+        else {
+            return Ok(false);
+        };
+        let fullscreen = atom(b"_NET_WM_STATE_FULLSCREEN")?;
+        Ok(state
+            .value32()
+            .is_some_and(|mut values| values.any(|value| value == fullscreen)))
+    }
     pub fn emergency_stop(&self) -> Result<bool> {
         let keys = self.conn.query_keymap()?.reply()?.keys;
         let pressed = |code: u8| {
@@ -146,7 +187,7 @@ impl X11 {
             let p = self.conn.query_pointer(self.root)?.reply()?;
             let point = [p.root_x as f64, p.root_y as f64];
             let at = self.sides.iter().any(|&s| self.display.on_edge(point, s));
-            if !at {
+            if !at || self.fullscreen_focused()? {
                 return Ok(None);
             }
             let mask =

@@ -204,7 +204,7 @@ impl Backend {
                 display,
                 desktop,
                 monitors,
-                label: "Windows: low-level hooks + SendInput",
+                label: "Windows: Raw Input + low-level hooks + SendInput",
                 held: Held::default(),
                 armed_sides: Vec::new(),
                 repeat: None,
@@ -330,7 +330,23 @@ impl Backend {
         }
         Ok(())
     }
+    fn check_fullscreen(&self) -> Result<()> {
+        let fullscreen = match &self.platform {
+            #[cfg(windows)]
+            Platform::Windows(_) => input_capture::windows_fullscreen_focused(),
+            #[cfg(target_os = "linux")]
+            Platform::X11(x) => x.fullscreen_focused()?,
+            #[cfg(any(not(windows), test))]
+            _ => false,
+        };
+        ensure!(
+            !fullscreen,
+            "Sharing stopped: a fullscreen app is focused; reconnect after leaving fullscreen"
+        );
+        Ok(())
+    }
     pub fn maintenance(&mut self) -> Result<bool> {
+        self.check_fullscreen()?;
         match &mut self.platform {
             #[cfg(test)]
             Platform::Test { .. } => Ok(false),
@@ -413,6 +429,9 @@ impl Backend {
     }
     pub fn inject(&mut self, event: Input) -> Result<()> {
         event.validate()?;
+        if matches!(event, Input::Motion { .. }) {
+            self.check_fullscreen()?;
+        }
         if !self.held.update(event) {
             return Ok(());
         }
@@ -679,9 +698,10 @@ mod native_tests {
     use x11rb::{
         connection::Connection,
         protocol::{
-            xproto::{ConnectionExt as _, GrabMode, GrabStatus, KeyButMask},
+            xproto::{AtomEnum, ConnectionExt as _, GrabMode, GrabStatus, KeyButMask, PropMode},
             xtest::ConnectionExt as _,
         },
+        wrapper::ConnectionExt as _,
     };
     #[tokio::test]
     #[ignore = "requires isolated Xvfb, WAYLAND_DISPLAY unset and RAVEL_TEST_X11=1"]
@@ -693,6 +713,65 @@ mod native_tests {
         assert_eq!(b.label, "Native X11: grabs + XTest");
         b.arm(Some(Side::Right)).await.unwrap();
         b.inject(Input::Motion { x: 1., y: 0.5 }).unwrap();
+        let atom = |name: &[u8]| {
+            observer
+                .intern_atom(false, name)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom
+        };
+        let active = atom(b"_NET_ACTIVE_WINDOW");
+        let state = atom(b"_NET_WM_STATE");
+        let fullscreen = atom(b"_NET_WM_STATE_FULLSCREEN");
+        // A synthetic EWMH foreground window exercises detection without a window manager.
+        observer
+            .change_property32(PropMode::REPLACE, root, active, AtomEnum::WINDOW, &[root])
+            .unwrap()
+            .check()
+            .unwrap();
+        observer
+            .change_property32(
+                PropMode::REPLACE,
+                root,
+                state,
+                AtomEnum::ATOM,
+                &[fullscreen],
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(
+            b.maintenance()
+                .unwrap_err()
+                .to_string()
+                .contains("fullscreen")
+        );
+        assert!(b.inject(Input::Motion { x: 0.5, y: 0.5 }).is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(40), b.next())
+                .await
+                .is_err(),
+            "fullscreen must prevent edge capture"
+        );
+        let grabbed = observer
+            .grab_keyboard(false, root, 0u32, GrabMode::ASYNC, GrabMode::ASYNC)
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(grabbed.status, GrabStatus::SUCCESS);
+        observer.ungrab_keyboard(0u32).unwrap().check().unwrap();
+        observer
+            .delete_property(root, state)
+            .unwrap()
+            .check()
+            .unwrap();
+        observer
+            .delete_property(root, active)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(!b.maintenance().unwrap());
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), b.next())
             .await
             .unwrap()
@@ -758,6 +837,23 @@ mod native_tests {
             b.inject(Input::Key { code, down: true }).unwrap();
         }
         assert!(b.maintenance().unwrap());
+        observer
+            .change_property32(PropMode::REPLACE, root, active, AtomEnum::WINDOW, &[root])
+            .unwrap()
+            .check()
+            .unwrap();
+        observer
+            .change_property32(
+                PropMode::REPLACE,
+                root,
+                state,
+                AtomEnum::ATOM,
+                &[fullscreen],
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(b.maintenance().is_err());
         b.close().await.unwrap();
         let keys = observer.query_keymap().unwrap().reply().unwrap().keys;
         for code in [30u8, 1, 29, 56, 42] {

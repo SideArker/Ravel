@@ -84,7 +84,7 @@ struct HandoffGate {
     reported_step: u8,
 }
 impl HandoffGate {
-    const DISTANCE: f64 = 48.;
+    const DISTANCE: f64 = 96.;
     const TIMEOUT: Duration = Duration::from_millis(1500);
 
     fn new(entry: [f64; 2]) -> Self {
@@ -914,10 +914,22 @@ async fn run_hub_inner(
                             let _ = signals.status.try_send(format!("Handoff error: {e}"));
                         }
                         emit_connections(&peers, &direction, &signals);
-                        let _ = signals.status.try_send(format!(
-                            "Connected to {peer_name} — {label}. Move to the {:?} edge to share.",
-                            ready.layout.side
-                        ));
+                        let edge_ready = backend.as_ref().is_some_and(|b| {
+                            monitor_bounds(&b.monitors)
+                                .is_ok_and(|bounds| b.display.is_outer_edge(bounds, ready.layout.side))
+                        });
+                        let status = if edge_ready {
+                            format!(
+                                "Connected to {peer_name} — {label}. Move to the {:?} edge to share.",
+                                ready.layout.side
+                            )
+                        } else {
+                            format!(
+                                "Connected to {peer_name}, but handoff is disabled: select a monitor on the outer {:?} edge, then reconnect.",
+                                ready.layout.side
+                            )
+                        };
+                        let _ = signals.status.try_send(status);
                     }
                     Err(e) => {
                         let _ = signals.status.try_send(format!("Connection setup failed: {e}"));
@@ -1243,6 +1255,7 @@ mod tests {
             let mut gate = HandoffGate::new([0., 0.]);
             assert!(gate.push(side, dx * 20., dy * 20.) < 1.);
             assert_eq!(gate.push(side, -dx * 30., -dy * 30.), 0.);
+            assert!(gate.push(side, dx * 48., dy * 48.) < 1.);
             assert_eq!(gate.push(side, dx * 48., dy * 48.), 1.);
             assert!(!gate.expired(gate.started + HandoffGate::TIMEOUT - Duration::from_millis(1)));
             assert!(gate.expired(gate.started + HandoffGate::TIMEOUT));

@@ -1,6 +1,6 @@
 use crate::{
     discovery::Peer,
-    geometry::{Display, Layout, Monitor, Side},
+    geometry::{Display, Layout, Monitor, Side, monitor_bounds},
     identity::pretty_fingerprint,
     runtime::{Command, Event, Worker},
     session::{Direction, Feedback, PeerConnection},
@@ -19,17 +19,44 @@ use std::{
 use tokio::sync::oneshot;
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::{Menu, MenuEvent, MenuId, MenuItem},
 };
 use zeroize::{Zeroize, Zeroizing};
 
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 
-#[derive(Clone, Copy)]
+const TRAY_OPEN_ID: &str = "ravel.open";
+const TRAY_HIDE_ID: &str = "ravel.hide";
+const TRAY_QUIT_ID: &str = "ravel.quit";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrayAction {
     Show,
     HideTray,
     Quit,
+}
+
+fn tray_menu_action(id: &MenuId) -> Option<TrayAction> {
+    match id.as_ref() {
+        TRAY_OPEN_ID => Some(TrayAction::Show),
+        TRAY_HIDE_ID => Some(TrayAction::HideTray),
+        TRAY_QUIT_ID => Some(TrayAction::Quit),
+        _ => None,
+    }
+}
+
+fn wake_tray_ui(ctx: &egui::Context, #[cfg(windows)] hwnd: Option<usize>) {
+    ctx.request_repaint();
+    #[cfg(windows)]
+    if let Some(hwnd) = hwnd {
+        use windows::Win32::{
+            Foundation::{HWND, LPARAM, WPARAM},
+            UI::WindowsAndMessaging::{PostMessageW, WM_PAINT},
+        };
+        // Windows does not deliver a requested redraw to a hidden window.
+        // Post a paint message so eframe runs update and handles the tray action.
+        let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_PAINT, WPARAM(0), LPARAM(0)) };
+    }
 }
 
 fn logo_rgba(size: u32) -> Vec<u8> {
@@ -133,6 +160,7 @@ fn tray_icon() -> anyhow::Result<Icon> {
 }
 
 /// Tokenize numbers and command letters from an SVG `<path d="...">` attribute.
+#[cfg(any(target_os = "linux", test))]
 fn tokenize_svg_path(d: &str) -> Vec<Result<char, f32>> {
     let mut out = Vec::new();
     let bytes = d.as_bytes();
@@ -179,6 +207,7 @@ fn tokenize_svg_path(d: &str) -> Vec<Result<char, f32>> {
 }
 
 /// Parse closed 2D contours from an SVG `<path d="...">` string (`M/m, L/l, H/h, V/v, C/c, Z/z`).
+#[cfg(any(target_os = "linux", test))]
 fn parse_svg_path_contours(d: &str) -> Vec<Vec<[f32; 2]>> {
     let tokens = tokenize_svg_path(d);
     let mut contours = Vec::new();
@@ -304,6 +333,7 @@ fn parse_svg_path_contours(d: &str) -> Vec<Vec<[f32; 2]>> {
 }
 
 /// Rasterize an SVG icon (`<path d="...">` on a 16×16 viewBox) into a white-alpha `ColorImage`.
+#[cfg(any(target_os = "linux", test))]
 fn rasterize_svg_icon(svg: &str, out_size: usize) -> Option<egui::ColorImage> {
     let mut contours = Vec::new();
     let mut rest = svg;
@@ -533,6 +563,8 @@ pub struct App {
     tray_failed: bool,
     tray_sender: mpsc::Sender<TrayAction>,
     tray_events: Receiver<TrayAction>,
+    #[cfg(windows)]
+    tray_hwnd: Option<usize>,
     #[cfg(target_os = "linux")]
     close_icon: Option<Option<egui::TextureHandle>>,
 }
@@ -587,6 +619,8 @@ impl App {
             tray_failed: false,
             tray_sender,
             tray_events,
+            #[cfg(windows)]
+            tray_hwnd: None,
             #[cfg(target_os = "linux")]
             close_icon: None,
         }
@@ -599,22 +633,13 @@ impl App {
         if self.tray.is_some() || self.tray_failed {
             return;
         }
-        let build = || -> anyhow::Result<TrayIcon> {
-            let menu = Menu::new();
-            let open = MenuItem::new("Open Ravel", true, None);
-            let hide_tray = MenuItem::new("Hide tray icon", true, None);
-            let quit = MenuItem::new("Quit Ravel and stop sharing", true, None);
-            menu.append(&open)?;
-            menu.append(&hide_tray)?;
-            menu.append(&quit)?;
-            let icon = TrayIconBuilder::new()
-                .with_icon(tray_icon()?)
-                .with_tooltip("Ravel")
-                .with_menu(Box::new(menu))
-                .with_menu_on_left_click(false)
-                .build()?;
+        // The library accepts these global handlers only once. Register them before
+        // creating the icon, and use IDs that survive tray/menu recreation.
+        {
             let sender = self.tray_sender.clone();
             let repaint = ctx.clone();
+            #[cfg(windows)]
+            let hwnd = self.tray_hwnd;
             TrayIconEvent::set_event_handler(Some(move |event| {
                 if matches!(
                     event,
@@ -628,30 +653,49 @@ impl App {
                     }
                 ) {
                     let _ = sender.send(TrayAction::Show);
-                    repaint.request_repaint();
+                    wake_tray_ui(
+                        &repaint,
+                        #[cfg(windows)]
+                        hwnd,
+                    );
                 }
             }));
             let sender = self.tray_sender.clone();
             let repaint = ctx.clone();
-            let open_id = open.id().clone();
-            let hide_id = hide_tray.id().clone();
-            let quit_id = quit.id().clone();
+            #[cfg(windows)]
+            let hwnd = self.tray_hwnd;
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-                let action = if event.id == open_id {
-                    Some(TrayAction::Show)
-                } else if event.id == hide_id {
-                    Some(TrayAction::HideTray)
-                } else if event.id == quit_id {
-                    Some(TrayAction::Quit)
-                } else {
-                    None
-                };
-                if let Some(action) = action {
+                if let Some(action) = tray_menu_action(&event.id) {
                     let _ = sender.send(action);
-                    repaint.request_repaint();
+                    wake_tray_ui(
+                        &repaint,
+                        #[cfg(windows)]
+                        hwnd,
+                    );
                 }
             }));
-            Ok(icon)
+        }
+        let build = || -> anyhow::Result<TrayIcon> {
+            let menu = Menu::new();
+            menu.append(&MenuItem::with_id(TRAY_OPEN_ID, "Open Ravel", true, None))?;
+            menu.append(&MenuItem::with_id(
+                TRAY_HIDE_ID,
+                "Hide tray icon",
+                true,
+                None,
+            ))?;
+            menu.append(&MenuItem::with_id(
+                TRAY_QUIT_ID,
+                "Quit Ravel and stop sharing",
+                true,
+                None,
+            ))?;
+            Ok(TrayIconBuilder::new()
+                .with_icon(tray_icon()?)
+                .with_tooltip("Ravel")
+                .with_menu(Box::new(menu))
+                .with_menu_on_left_click(false)
+                .build()?)
         };
         match build() {
             Ok(icon) => {
@@ -1308,6 +1352,27 @@ impl App {
             }
         });
 
+        if let (Ok(bounds), Some(selected)) = (
+            monitor_bounds(&self.monitors),
+            self.selected_monitor
+                .as_deref()
+                .and_then(|id| self.monitors.iter().find(|m| m.id == id))
+                .or_else(|| self.monitors.first()),
+        ) && !selected.display.is_outer_edge(bounds, self.layout.side)
+            && let Some(outer) = self
+                .monitors
+                .iter()
+                .find(|m| m.display.is_outer_edge(bounds, self.layout.side))
+        {
+            ui.colored_label(
+                Color32::from_rgb(230, 180, 90),
+                format!(
+                    "{} has no outer {:?} edge. Select {} above, then reconnect.",
+                    selected.id, self.layout.side, outer.id
+                ),
+            );
+        }
+
         self.draw_interactive_layout(ui, &active_fp);
     }
 
@@ -1595,7 +1660,20 @@ impl App {
     }
 }
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if self.tray_hwnd.is_none() {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            self.tray_hwnd = frame.window_handle().ok().and_then(|handle| {
+                if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                    Some(win32.hwnd.get() as usize)
+                } else {
+                    None
+                }
+            });
+        }
+        #[cfg(not(windows))]
+        let _ = frame;
         if !self.repaint_registered {
             let repaint = ctx.clone();
             self.worker.set_repaint(move || repaint.request_repaint());
@@ -2107,6 +2185,19 @@ fn truncate_label(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_menu_ids_route_to_actions_after_recreation() {
+        for _ in 0..2 {
+            let open = MenuItem::with_id(TRAY_OPEN_ID, "Open Ravel", true, None);
+            let hide = MenuItem::with_id(TRAY_HIDE_ID, "Hide tray icon", true, None);
+            let quit = MenuItem::with_id(TRAY_QUIT_ID, "Quit Ravel", true, None);
+            assert_eq!(tray_menu_action(open.id()), Some(TrayAction::Show));
+            assert_eq!(tray_menu_action(hide.id()), Some(TrayAction::HideTray));
+            assert_eq!(tray_menu_action(quit.id()), Some(TrayAction::Quit));
+        }
+        assert_eq!(tray_menu_action(&MenuId::new("other")), None);
+    }
 
     fn local() -> Rect {
         Rect::from_center_size(Pos2::new(200., 100.), egui::vec2(100., 60.))

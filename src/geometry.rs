@@ -81,9 +81,8 @@ impl Display {
 pub fn selected_monitor(monitors: &[Monitor], id: Option<&str>) -> Result<Display> {
     ensure!(!monitors.is_empty(), "No active monitors found");
     let monitor = id
-        .map(|id| monitors.iter().find(|m| m.id == id))
-        .unwrap_or_else(|| monitors.first())
-        .ok_or_else(|| anyhow::anyhow!("Selected monitor is no longer active"))?;
+        .and_then(|id| monitors.iter().find(|m| m.id == id))
+        .unwrap_or(&monitors[0]);
     monitor.display.validate()
 }
 
@@ -260,7 +259,10 @@ mod tests {
                 scale: 1.
             }
         );
-        assert!(selected_monitor(&monitors, Some("removed")).is_err());
+        assert_eq!(
+            selected_monitor(&monitors, Some("removed")).unwrap(),
+            monitors[0].display
+        );
     }
     #[test]
     fn negative_origin_and_scaling_use_logical_coordinates() {

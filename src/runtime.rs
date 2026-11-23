@@ -347,6 +347,11 @@ async fn work(
                 }
                 Some((monitors, backend)) = monitors_rx.recv() => {
                     if !monitors.is_empty() {
+                        match refresh_selected_monitor(&mut ctx_forward.store.borrow_mut(), &monitors) {
+                            Ok(Some(fallback)) => ctx_forward.send_event(Event::SelectedMonitor(Some(fallback))),
+                            Ok(None) => {}
+                            Err(error) => ctx_forward.status(format!("Could not save active monitor: {error}")),
+                        }
                         ctx_forward.send_event(Event::Monitors(monitors));
                     }
                     ctx_forward.send_event(Event::Backend(backend));
@@ -584,6 +589,20 @@ async fn work(
     })
     .await;
     Ok(())
+}
+
+fn refresh_selected_monitor(store: &mut Store, monitors: &[Monitor]) -> Result<Option<String>> {
+    let Some(selected) = store.monitor() else {
+        return Ok(None);
+    };
+    if monitors.iter().any(|monitor| monitor.id == selected) {
+        return Ok(None);
+    }
+    let Some(fallback) = monitors.first() else {
+        return Ok(None);
+    };
+    store.set_monitor(fallback.id.clone())?;
+    Ok(Some(fallback.id.clone()))
 }
 
 async fn connect(address: &str) -> Result<TcpStream> {
@@ -877,7 +896,36 @@ fn request_control(directory: &std::path::Path, filename: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pairing::PIN_LIFETIME;
+    use crate::{geometry::Display, pairing::PIN_LIFETIME};
+
+    #[test]
+    fn disabled_selected_monitor_is_replaced_with_an_active_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::load(directory.path()).unwrap();
+        store.set_monitor("DISPLAY1".into()).unwrap();
+        let active = Monitor {
+            id: "DISPLAY2".into(),
+            display: Display {
+                x: 0.,
+                y: 0.,
+                width: 1920.,
+                height: 1080.,
+                scale: 1.,
+            },
+        };
+        assert_eq!(
+            refresh_selected_monitor(&mut store, std::slice::from_ref(&active)).unwrap(),
+            Some(active.id.clone())
+        );
+        assert_eq!(
+            Store::load(directory.path()).unwrap().monitor(),
+            Some("DISPLAY2")
+        );
+        assert_eq!(
+            refresh_selected_monitor(&mut store, &[active]).unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn autoconnect_requires_existing_trust() {
@@ -1233,7 +1281,7 @@ mod control_transport_tests {
                     .send(CaptureEvent::Input(InputEvent::Pointer(
                         PointerEvent::Motion {
                             time: 0,
-                            dx: 50.,
+                            dx: 100.,
                             dy: 0.,
                         },
                     )))

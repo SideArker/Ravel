@@ -1,7 +1,11 @@
-use anyhow::{Context, Result, ensure};
+#[cfg(any(target_os = "linux", windows))]
+use anyhow::ensure;
+use anyhow::{Context, Result};
 use semver::Version;
 use serde::Deserialize;
-use std::{path::PathBuf, process::Command, time::Duration};
+#[cfg(any(target_os = "linux", windows))]
+use std::process::Command;
+use std::{path::PathBuf, time::Duration};
 
 const LATEST_RELEASE: &str = "https://api.github.com/repos/SideArker/Ravel/releases/latest";
 
@@ -124,6 +128,7 @@ pub fn install(version: &Version) -> Result<()> {
     }
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(60)))
