@@ -39,6 +39,7 @@ fn run() -> Result<()> {
     let mut kill_all = false;
     let mut probe = false;
     let mut smoke = false;
+    let mut foreground = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -53,9 +54,10 @@ fn run() -> Result<()> {
             "--kill-all" => kill_all = true,
             "--probe-backend" => probe = true,
             "--smoke-gui" => smoke = true,
+            "--foreground" => foreground = true,
             "--help" | "-h" => {
                 println!(
-                    "Ravel — LAN mouse & keyboard sharing\n\nOptions: --name NAME --port PORT --state-dir PATH --stop --kill-all --probe-backend --smoke-gui\nSee README.md and docs/operation.md for pairing, backends and stop bindings."
+                    "Ravel — LAN mouse & keyboard sharing\n\nOptions: --name NAME --port PORT --state-dir PATH --stop --kill-all --probe-backend --smoke-gui --foreground\nSee README.md and docs/operation.md for pairing, backends and stop bindings."
                 );
                 return Ok(());
             }
@@ -86,7 +88,7 @@ fn run() -> Result<()> {
             backend.close().await
         });
     }
-    if !smoke && std::env::var_os("RAVEL_DAEMON_CHILD").is_none() {
+    if !smoke && !foreground && std::env::var_os("RAVEL_DAEMON_CHILD").is_none() {
         return start_or_show_daemon(&directory);
     }
     let store = ravel::store::Store::load(&directory)?;
@@ -98,6 +100,9 @@ fn run() -> Result<()> {
     let worker = match Worker::start(directory.clone(), name.clone(), port, None) {
         Ok(worker) => worker,
         Err(error) => {
+            if foreground {
+                return Err(error).context("Cannot start foreground Ravel; close the running instance with --kill-all first");
+            }
             if runtime::request_show(&directory).is_ok() {
                 return Ok(());
             }

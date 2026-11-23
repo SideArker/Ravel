@@ -23,7 +23,12 @@ See [verification](verification.md) for exactly what has been exercised.
    if needed and choose **Save handoff edge**. Then choose **Start sharing** on the receiving
    device and **Connect to device** on the initiating device. Connecting also
    allows sharing locally.
-6. Push outward through the configured edge by 96 motion units within 1.5 seconds until the handoff indicator fills. Moving inward reduces the accumulated push.
+6. Under **Mouse & keyboard transfer**, choose **This PC → Other PC**, the reverse,
+   or **Both directions** (the UI uses the actual device names). Set this while
+   connected: the choice is saved for this pair and synced to the other PC for
+   future connections. Return to local control before changing it. Either PC can
+   reclaim its own input with **Take control on this device**, regardless of mode.
+7. Push outward through the configured edge by 96 motion units within 1.5 seconds until the handoff indicator fills. Moving inward reduces the accumulated push.
    Mouse and keyboard input then go to the other device. Both devices can be the
    sender; the header shows which device currently controls the other. The
    receiving device can press **Take control on this device** to return control
@@ -37,7 +42,7 @@ device** if it is not connected. With exactly one paired device saved, Ravel
 also tries to reconnect automatically on startup. A PIN is only needed for
 first pairing or after unpairing.
 
-Both devices must run protocol version 3 after this update. The connection is
+Both devices must run this development build (protocol version 5). Older released builds cannot connect to it. The connection is
 OS-neutral: Linux↔Linux, Windows↔Windows, macOS↔macOS and mixed-OS pairs use the same pairing
 and TLS session, subject to the local backend working on each endpoint. See the
 [compatibility plan](compatibility.md) for desktop coverage and remaining native QA.
@@ -61,6 +66,51 @@ calibration; they have not been certified. The OS continues to handle movement
 between local monitors. Ravel captures only the selected monitor's handoff edge;
 the selected monitor must be at the outer edge in the chosen direction. A monitor
 change takes effect on the next connection.
+
+## Testing changes without a release
+
+A tag is not needed. On a machine with Rust and the build prerequisites installed:
+
+```sh
+cargo test single_peer --locked
+cargo build --locked
+# Stop the installed background copy before running the new binary.
+target/debug/ravel --kill-all
+RAVEL_DEBUG=1 target/debug/ravel --foreground
+```
+
+On Windows PowerShell:
+
+```powershell
+cargo test single_peer --locked
+cargo build --locked
+.\target\debug\ravel.exe --kill-all
+$env:RAVEL_DEBUG = '1'
+.\target\debug\ravel.exe --foreground
+```
+
+Use the same development build on both PCs. Reuse the normal state directory to
+keep pairing and layouts. `--foreground` prevents spawning a detached copy and
+reports a running-instance conflict instead of silently reopening an old build.
+With `RAVEL_DEBUG=1`, the window stays visible on automatic connection. Console
+logs show backend selection, armed edges, connected peers, handoff progress,
+and Sending/Receiving state; they do not log typed keys or PINs. The Details
+panel identifies the app and protocol versions.
+
+Without a Rust setup on Windows, open GitHub Actions → **development-builds** →
+**Run workflow**, choose the desired branch, and download `ravel-dev-Windows`
+and `ravel-dev-Linux` from the completed run. Extract and run `ravel.exe` or
+`ravel` with `--foreground`. These are debug binaries; the workflow creates no
+tag and publishes no release. On subsequent edits, repeat this workflow or
+`cargo build`; an incremental local debug build avoids release optimization.
+
+For a physical check, connect the two PCs and verify logs show an armed edge,
+then push through it: progress must reach 100%, the sender must show its peer as
+controlled, the receiver must name the input host, and the receiving cursor
+must actually move. Cross back, test the reverse direction in **Both directions**,
+then test each one-way choice and restart both apps to check it persists.
+The fast `single_peer` regression checks the real hub handshake and motion
+frames using test input adapters; it does not certify physical capture/injection.
 
 ## Fullscreen applications
 

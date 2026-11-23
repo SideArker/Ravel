@@ -303,7 +303,9 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
     let mut tick = tokio::time::interval(Duration::from_millis(25));
     let mut rearm_at = None;
     let mut handoff: Option<HandoffGate> = None;
-    backend.arm(Some(layout.side)).await?;
+    backend
+        .arm(layout.transfer.can_send().then_some(layout.side))
+        .await?;
     let _ = signals
         .feedback
         .try_send(Feedback::Controller(Direction::Local));
@@ -323,7 +325,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                 ensure!(signals.store.borrow().trusted(&signals.fingerprint),"Peer trust revoked");
                 ensure!(!signals.stop.has_changed()?,"Sharing stopped");
                 match message.ok_or_else(||anyhow!("Connection closed"))?? {
-                    Message::Enter(p)=>{ensure!(point_valid(p),"Invalid entry point");direction.receive_enter()?;handoff=None;backend.arm(None).await?;backend.inject(Input::Motion{x:p[0],y:p[1]})?;let _=signals.feedback.try_send(Feedback::Controller(Direction::Receiving));let _=signals.feedback.try_send(Feedback::Handoff{progress:1.,incoming:true});let _=signals.status.try_send("Receiving remote input — Disconnect stops sharing".into());},
+                    Message::Enter(p)=>{ensure!(layout.transfer.can_receive(),"Transfer direction does not allow remote control");ensure!(point_valid(p),"Invalid entry point");direction.receive_enter()?;handoff=None;backend.arm(None).await?;backend.inject(Input::Motion{x:p[0],y:p[1]})?;let _=signals.feedback.try_send(Feedback::Controller(Direction::Receiving));let _=signals.feedback.try_send(Feedback::Handoff{progress:1.,incoming:true});let _=signals.status.try_send("Receiving remote input — Disconnect stops sharing".into());},
                     Message::Input(event)=>{direction.receive_input()?;backend.inject(event.validate()?)?;},
                     Message::Leave=>{direction.receive_leave()?;backend.release_input()?;rearm_at=Some(Instant::now()+Duration::from_millis(350));let _=signals.feedback.try_send(Feedback::Controller(Direction::Local));let _=signals.status.try_send("Connected — local control".into());},
                     Message::ReturnControl=>{
@@ -334,8 +336,9 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                         next.validate()?;
                         signals.store.borrow_mut().set_layout(&signals.fingerprint, next)?;
                         layout = next;
+                        handoff = None;
                         if direction == Direction::Local && rearm_at.is_none() {
-                            backend.arm(Some(layout.side)).await?;
+                            backend.arm(layout.transfer.can_send().then_some(layout.side)).await?;
                         }
                     },
                     Message::Ping=>{},Message::Stop=>{signals.stop_request.send_modify(|e| *e=e.wrapping_add(1));return Ok(());},
@@ -346,7 +349,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
                 let event=event?;
                 match event {
                     CaptureEvent::Begin{point:entry}=>{
-                        if direction!=Direction::Local || rearm_at.is_some(){backend.release_capture().await?;continue;}
+                        if direction!=Direction::Local || rearm_at.is_some() || !layout.transfer.can_send(){backend.release_capture().await?;continue;}
                         if !backend.display.on_edge(entry, layout.side) {backend.release_capture().await?;continue;}
                         if layout.enter(backend.display.normalize(entry)).is_some() {
                             handoff=Some(HandoffGate::new(entry));
@@ -397,7 +400,7 @@ async fn control<S: AsyncRead + AsyncWrite + Unpin + 'static>(
             _=heartbeat.tick()=>{backend.check_geometry()?;ensure!(signals.store.borrow().trusted(&signals.fingerprint),"Peer trust revoked");send(&outgoing,Message::Ping)?;},
             _=tick.tick()=>{if backend.maintenance()? {signals.stop_request.send_modify(|e| *e=e.wrapping_add(1));send_stop(&urgent_stop).await;return Ok(());}
                 if handoff.as_ref().is_some_and(|gate|gate.expired(Instant::now())){handoff=None;backend.arm(None).await?;rearm_at=Some(Instant::now()+Duration::from_millis(350));let _=signals.feedback.try_send(Feedback::Handoff{progress:0.,incoming:false});}
-                if rearm_at.is_some_and(|t|Instant::now()>=t) && direction==Direction::Local{backend.arm(Some(layout.side)).await?;rearm_at=None;}},
+                if rearm_at.is_some_and(|t|Instant::now()>=t) && direction==Direction::Local{backend.arm(layout.transfer.can_send().then_some(layout.side)).await?;rearm_at=None;}},
         }
     }
 }
@@ -533,6 +536,9 @@ async fn arm_all(
     let bounds = monitor_bounds(&b.monitors)?;
     let mut sides = Vec::new();
     for peer in peers.values() {
+        if !peer.layout.transfer.can_send() {
+            continue;
+        }
         if b.display.is_outer_edge(bounds, peer.layout.side) {
             if !sides.contains(&peer.layout.side) {
                 sides.push(peer.layout.side);
@@ -544,7 +550,11 @@ async fn arm_all(
             ));
         }
     }
-    b.arm_sides(&sides).await
+    b.arm_sides(&sides).await?;
+    if std::env::var("RAVEL_DEBUG").as_deref() == Ok("1") {
+        eprintln!("[ravel] capture armed: {sides:?} — {}", b.label);
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -649,7 +659,6 @@ async fn run_hub_inner(
     let mut handoff: Option<HubGate> = None;
     let mut rearm_at: Option<Instant> = None;
     let (incoming_tx, mut incoming_rx) = mpsc::channel::<(String, Result<Message>)>(256);
-    let (ready_tx, mut ready_rx) = mpsc::channel::<Result<ReadyPeer>>(16);
     let mut handshakes = tokio::task::JoinSet::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     let mut tick = tokio::time::interval(Duration::from_millis(25));
@@ -724,7 +733,6 @@ async fn run_hub_inner(
                         let display = b.display;
                         let desktop = b.desktop;
                         let layout = signals.store.borrow().layout(&fingerprint);
-                        let ready_tx = ready_tx.clone();
                         let mut stop_rx = signals.stop.clone();
                         let expected_epoch = stop_epoch;
                         handshakes.spawn_local(async move {
@@ -751,16 +759,16 @@ async fn run_hub_inner(
                                 })
                             };
                             if *stop_rx.borrow() != expected_epoch {
-                                return;
+                                return None;
                             }
                             let res = tokio::select! {
                                 biased;
-                                _ = stop_rx.changed() => return,
+                                _ = stop_rx.changed() => return None,
                                 r = tokio::time::timeout(Duration::from_secs(5), exchange) => {
                                     r.map_err(|_| anyhow!("Display exchange timed out")).and_then(|v| v)
                                 }
                             };
-                            let _ = ready_tx.send(res).await;
+                            Some(res)
                         });
                     }
                     HubCommand::Disconnect(fp) => {
@@ -780,6 +788,7 @@ async fn run_hub_inner(
                     HubCommand::UpdateLayout { fingerprint, layout } => {
                         if let Some(peer) = peers.get_mut(&fingerprint) {
                             peer.layout = layout;
+                            handoff = None;
                             let _ = send(&peer.outgoing, Message::Layout(layout.reciprocal()));
                             if direction == HubDirection::Local
                                 && rearm_at.is_none()
@@ -817,15 +826,19 @@ async fn run_hub_inner(
                     }
                 }
             },
-            Some(_) = handshakes.join_next() => {
-                if peers.is_empty() && handshakes.is_empty() && let Some(mut b) = backend.take() {
-                    let _ = b.close().await;
-                }
-            },
-            Some(ready_res) = ready_rx.recv() => {
+            Some(completed) = handshakes.join_next() => {
+                // Install the handshake result before deciding whether capture is unused.
+                let ready_res = match completed {
+                    Ok(Some(result)) => result,
+                    Ok(None) => continue,
+                    Err(error) => Err(anyhow!("Display handshake failed: {error}")),
+                };
                 match ready_res {
                     Ok(ready) => {
-                        if !signals.store.borrow().trusted(&ready.fingerprint) {
+                        if backend.is_none() || !signals.store.borrow().trusted(&ready.fingerprint) {
+                            if peers.is_empty() && handshakes.is_empty() && let Some(mut b) = backend.take() {
+                                let _ = b.close().await;
+                            }
                             continue;
                         }
                         if let Err(e) = signals.store.borrow_mut().set_layout(&ready.fingerprint, ready.layout) {
@@ -918,7 +931,9 @@ async fn run_hub_inner(
                             monitor_bounds(&b.monitors)
                                 .is_ok_and(|bounds| b.display.is_outer_edge(bounds, ready.layout.side))
                         });
-                        let status = if edge_ready {
+                        let status = if !ready.layout.transfer.can_send() {
+                            format!("Connected to {peer_name} — receiving input only. {peer_name} can transfer control to this PC.")
+                        } else if edge_ready {
                             format!(
                                 "Connected to {peer_name} — {label}. Move to the {:?} edge to share.",
                                 ready.layout.side
@@ -958,6 +973,7 @@ async fn run_hub_inner(
                 let step_res: Result<()> = async {
                     match msg {
                         Message::Enter(p) => {
+                            ensure!(peers[&fp].layout.transfer.can_receive(), "Transfer direction does not allow remote control");
                             ensure!(point_valid(p), "Invalid entry point");
                             ensure!(direction == HubDirection::Local, "Conflicting control ownership");
                             handoff = None;
@@ -1010,6 +1026,7 @@ async fn run_hub_inner(
                             let _ = signals.trusted_changed.try_send(());
                             if let Some(peer) = peers.get_mut(&fp) {
                                 peer.layout = next_layout;
+                                handoff = None;
                             }
                             if direction == HubDirection::Local && rearm_at.is_none() {
                                 arm_all(&mut backend, &peers, &signals).await?;
@@ -1048,7 +1065,8 @@ async fn run_hub_inner(
                         }
                         let norm = b.display.normalize(entry);
                         let matched = peers.iter().find(|(_, p)| {
-                            side_hint.is_none_or(|s| s == p.layout.side)
+                            p.layout.transfer.can_send()
+                                && side_hint.is_none_or(|s| s == p.layout.side)
                                 && b.display.on_edge(entry, p.layout.side)
                                 && p.layout.enter(norm).is_some()
                         });

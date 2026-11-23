@@ -207,6 +207,24 @@ struct Context {
 }
 impl Context {
     fn send_event(&self, event: Event) {
+        if std::env::var("RAVEL_DEBUG").as_deref() == Ok("1") {
+            match &event {
+                Event::Status(message) | Event::Backend(message) => eprintln!("[ravel] {message}"),
+                Event::Connections(peers) => {
+                    eprintln!("[ravel] connected peers: {}", peers.len());
+                    for peer in peers {
+                        eprintln!("[ravel] peer {}: {:?}", peer.name, peer.controller);
+                    }
+                }
+                Event::Feedback(Feedback::Handoff { progress, incoming }) => {
+                    eprintln!(
+                        "[ravel] handoff: {:.0}% incoming={incoming}",
+                        progress * 100.
+                    );
+                }
+                _ => {}
+            }
+        }
         let _ = self.events.try_send(event);
         if let Some(cb) = self.repaint.lock().unwrap().as_ref() {
             cb();

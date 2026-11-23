@@ -1,5 +1,32 @@
 # Implementation evidence and release gates
 
+## 2026-11-23 single-peer hub regression and development testing
+
+A deterministic single-peer regression failed on the v0.5.1 code: a peer was
+reported connected after its input backend had been closed. The multi-peer hub
+introduced in `4d3344d` used separate completion and Ready queues. Its biased
+select handled handshake completion first and interpreted the empty peer map as
+an unused backend, then installed the queued Ready peer without capture.
+The hub now installs the handshake result directly from its JoinSet, before
+considering cleanup. A Ready result cannot create a connection without a backend.
+
+`cargo test single_peer --locked` checks capture survives the first connection,
+edge push sends Enter then mouse motion, and capture closes on shutdown. Separate
+cases enforce send-only and receive-only modes at the production hub boundary.
+Store and geometry tests cover saved choices, reciprocal directions, and old
+layouts defaulting to bidirectional transfer. Existing multiple-peer tests cover
+live layout updates. These tests use test input adapters, not physical devices.
+
+Development builds use protocol 5 for the saved transfer-mode field; both PCs
+must use the new build. The foreground flag, opt-in stage logs, and manual
+`development-builds` workflow provide a test loop without publishing a release.
+See [operation](operation.md#testing-changes-without-a-release) for commands and
+the physical two-PC acceptance check. Local checks passed: 67 workspace tests, Clippy with warnings denied, formatting,
+a debug build, and CLI help exposing `--foreground`. The focused single-peer
+regressions finish in well under a second after compilation. Native capture,
+remote cursor movement, and the new visible controls still require testing on
+the user's physical pair.
+
 ## 2026-11-23 v0.5.1 handoff safeguards
 
 The outward push requirement is now 96 motion units within 1.5 seconds on all

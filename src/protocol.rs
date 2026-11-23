@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 pub const MAX_FRAME: usize = 4096;
 
 #[derive(Serialize, Deserialize)]
@@ -128,6 +128,7 @@ mod tests {
         let layout = Layout {
             side: Side::Top,
             alignment: -0.25,
+            ..Default::default()
         };
         let mut buf = Vec::new();
         write(&mut buf, &Message::Layout(layout)).await.unwrap();
@@ -135,7 +136,7 @@ mod tests {
             panic!("expected Layout");
         };
         assert_eq!(read_back, layout);
-        assert_eq!(VERSION, 4);
+        assert_eq!(VERSION, 5);
     }
     #[test]
     fn rejects_invalid_input() {

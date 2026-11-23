@@ -1,6 +1,6 @@
 use crate::{
     discovery::Peer,
-    geometry::{Display, Layout, Monitor, Side, monitor_bounds},
+    geometry::{Display, Layout, Monitor, Side, TransferMode, monitor_bounds},
     identity::pretty_fingerprint,
     runtime::{Command, Event, Worker},
     session::{Direction, Feedback, PeerConnection},
@@ -843,6 +843,7 @@ impl App {
                     if was_empty && !self.connections.is_empty() {
                         if !self.had_connection
                             && !self.user_interacted
+                            && std::env::var("RAVEL_DEBUG").as_deref() != Ok("1")
                             && self.can_hide
                             && (self.tray.is_some() || self.hide_tray)
                         {
@@ -1322,6 +1323,41 @@ impl App {
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "Device".into());
 
+        let previous = self.layout.transfer;
+        ui.add_enabled_ui(
+            self.connections
+                .values()
+                .all(|c| c.controller == Direction::Local),
+            |ui| {
+                ui.label("Mouse & keyboard transfer (saved for this pair):");
+                egui::ComboBox::from_id_salt("transfer_direction")
+                    .selected_text(transfer_label(
+                        self.layout.transfer,
+                        &self.name,
+                        &active_name,
+                    ))
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            TransferMode::SendOnly,
+                            TransferMode::ReceiveOnly,
+                            TransferMode::Both,
+                        ] {
+                            ui.selectable_value(
+                                &mut self.layout.transfer,
+                                mode,
+                                transfer_label(mode, &self.name, &active_name),
+                            );
+                        }
+                    });
+            },
+        );
+        if previous != self.layout.transfer {
+            self.user_interacted = true;
+            self.command(Command::Layout {
+                fingerprint: active_fp.clone(),
+                layout: self.layout,
+            });
+        }
         ui.horizontal(|ui| {
             ui.weak(format!("Drag {active_name}:"));
             for (side, label) in [
@@ -1459,6 +1495,7 @@ impl App {
                 );
                 live_center = Some(*pos);
                 preview_layout = snap_layout_from_drag(local_rect, peer_size, *pos);
+                preview_layout.transfer = peer_layout.transfer;
                 self.layout = preview_layout;
             }
 
@@ -1466,7 +1503,8 @@ impl App {
                 && let Some((drag_fp, pos)) = self.dragging.take()
                 && &drag_fp == fp
             {
-                let final_layout = snap_layout_from_drag(local_rect, peer_size, pos);
+                let mut final_layout = snap_layout_from_drag(local_rect, peer_size, pos);
+                final_layout.transfer = peer_layout.transfer;
                 self.layout = final_layout;
                 preview_layout = final_layout;
                 live_center = None;
@@ -1562,6 +1600,11 @@ impl App {
 
     fn show_details(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Details").show(ui, |ui| {
+            ui.weak(format!(
+                "Ravel {} · protocol {}",
+                env!("CARGO_PKG_VERSION"),
+                crate::protocol::VERSION
+            ));
             let mut restart_requested = false;
             let mut manual_update = None;
             ui.horizontal(|ui| {
@@ -1834,12 +1877,12 @@ impl eframe::App for App {
                 if let Some(peer_name) = sending_to {
                     ui.colored_label(
                         Color32::from_rgb(100, 220, 135),
-                        RichText::new(format!("Controlling {peer_name}")).strong(),
+                        RichText::new(format!("Input host: {} → {peer_name}", self.name)).strong(),
                     );
                 } else if let Some(peer_name) = receiving_from {
                     ui.colored_label(
                         Color32::from_rgb(230, 180, 90),
-                        RichText::new(format!("{peer_name} is controlling this device")).strong(),
+                        RichText::new(format!("Input host: {peer_name} → {}", self.name)).strong(),
                     );
                     if ui.button("Take control on this device").clicked() {
                         self.user_interacted = true;
@@ -1848,8 +1891,12 @@ impl eframe::App for App {
                 } else if !connected_names.is_empty() {
                     ui.colored_label(
                         Color32::from_rgb(100, 200, 130),
-                        RichText::new(format!("Connected: {}", connected_names.join(", ")))
-                            .strong(),
+                        RichText::new(format!(
+                            "Local control: {} · Connected: {}",
+                            self.name,
+                            connected_names.join(", ")
+                        ))
+                        .strong(),
                     );
                 } else if self.backend.starts_with("Backend unavailable") {
                     ui.colored_label(
@@ -2109,6 +2156,14 @@ fn peer_box_center(local_rect: Rect, peer_size: Vec2, layout: Layout) -> Pos2 {
     }
 }
 
+fn transfer_label(mode: TransferMode, local: &str, remote: &str) -> String {
+    match mode {
+        TransferMode::SendOnly => format!("{local} → {remote}"),
+        TransferMode::ReceiveOnly => format!("{remote} → {local}"),
+        TransferMode::Both => format!("Both directions: {local} ↔ {remote}"),
+    }
+}
+
 fn snap_layout_from_drag(local_rect: Rect, peer_size: Vec2, drag_center: Pos2) -> Layout {
     let delta = drag_center - local_rect.center();
     let nx = delta.x / ((local_rect.width() + peer_size.x) * 0.5).max(1.);
@@ -2125,7 +2180,11 @@ fn snap_layout_from_drag(local_rect: Rect, peer_size: Vec2, drag_center: Pos2) -
     if alignment.abs() < 0.05 {
         alignment = 0.0;
     }
-    Layout { side, alignment }
+    Layout {
+        side,
+        alignment,
+        ..Default::default()
+    }
 }
 
 fn draw_seam(
@@ -2226,6 +2285,7 @@ mod tests {
         let layout = Layout {
             side: Side::Right,
             alignment: 0.4,
+            ..Default::default()
         };
         let center = peer_box_center(local(), peer, layout);
         let back = snap_layout_from_drag(local(), peer, center);

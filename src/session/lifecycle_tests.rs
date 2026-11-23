@@ -1,5 +1,8 @@
 use super::*;
-use crate::{geometry::Side, input::TestTrace};
+use crate::{
+    geometry::{Side, TransferMode},
+    input::TestTrace,
+};
 use tokio::io::DuplexStream;
 
 struct Session {
@@ -679,6 +682,7 @@ async fn hub_supports_multiple_peers_and_live_layout_updates() {
                     Layout {
                         side: Side::Left,
                         alignment: 0.0,
+                        ..Default::default()
                     },
                 )
                 .unwrap();
@@ -688,6 +692,7 @@ async fn hub_supports_multiple_peers_and_live_layout_updates() {
                     Layout {
                         side: Side::Right,
                         alignment: 0.0,
+                        ..Default::default()
                     },
                 )
                 .unwrap();
@@ -805,6 +810,7 @@ async fn hub_supports_multiple_peers_and_live_layout_updates() {
                     layout: Layout {
                         side: Side::Top,
                         alignment: 0.25,
+                        transfer: TransferMode::SendOnly,
                     },
                 })
                 .await
@@ -815,6 +821,7 @@ async fn hub_supports_multiple_peers_and_live_layout_updates() {
                 Message::Layout(Layout {
                     side: Side::Bottom,
                     alignment,
+                    transfer: TransferMode::ReceiveOnly,
                 }) if (alignment + 0.25).abs() < 1e-6
             ));
             trace
@@ -856,4 +863,100 @@ async fn hub_supports_multiple_peers_and_live_layout_updates() {
             hub_task.await.unwrap().unwrap();
         })
         .await;
+}
+
+async fn check_single_peer_transfer(mode: TransferMode) {
+    tokio::task::LocalSet::new().run_until(async {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::load(directory.path()).unwrap();
+        let fp = "cd".repeat(32);
+        store.trust(fp.clone(), "Single peer".into()).unwrap();
+        store.set_layout(&fp, Layout { transfer: mode, ..Default::default() }).unwrap();
+        let (stop, stop_rx) = watch::channel(0);
+        let (_take, take_rx) = watch::channel(0);
+        let (status, _statuses) = mpsc::channel(32);
+        let (feedback, _feedbacks) = mpsc::channel(32);
+        let (connections, mut connection_events) = mpsc::channel(32);
+        let (monitors, _monitors) = mpsc::channel(16);
+        let (trusted_changed, _trusted) = mpsc::channel(16);
+        let (commands, command_rx) = mpsc::channel(32);
+        let (backend, capture, trace) = Backend::test();
+        let hub = tokio::task::spawn_local(run_hub_with_backend(command_rx, HubSignals {
+            stop: stop_rx, stop_request: stop.clone(), take_control: take_rx,
+            store: Rc::new(RefCell::new(store)), status, feedback, connections,
+            monitors, trusted_changed,
+        }, backend));
+        let (local, mut remote) = tokio::io::duplex(65536);
+        commands.send(HubCommand::Attach { stream: Box::new(local), fingerprint: fp, initiator: true }).await.unwrap();
+        let Message::Ready { display, desktop, layout } = protocol::read(&mut remote).await.unwrap() else { panic!("Expected Ready"); };
+        protocol::write(&mut remote, &Message::Ready { display, desktop, layout: layout.reciprocal() }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if connection_events.recv().await.unwrap().len() == 1 { break; }
+            }
+        }).await.unwrap();
+        assert!(!trace.state.borrow().closed, "Connected peer has no input backend: handshake completion closed capture before the peer was installed");
+        if mode.can_send() {
+        trace.wait_for(|state| state.armed == Some(Side::Right)).await;
+        capture.send(CaptureEvent::Begin { point: [999., 400.] }).await.unwrap();
+        capture.send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion { time: 0, dx: 100., dy: 0. }))).await.unwrap();
+        capture.send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion { time: 1, dx: 10., dy: 0. }))).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut entered = false;
+            loop {
+                match protocol::read(&mut remote).await.unwrap() {
+                    Message::Enter(_) => entered = true,
+                    Message::Input(Input::Motion { .. }) => { assert!(entered); break; }
+                    Message::Ping => {},
+                    _ => panic!("Expected transferred mouse motion"),
+                }
+            }
+        }).await.expect("Connected peer never received mouse motion");
+        if mode.can_receive() {
+            protocol::write(&mut remote, &Message::ReturnControl).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let peers = connection_events.recv().await.unwrap();
+                    if peers.first().is_some_and(|p| p.controller == Direction::Local) { break; }
+                }
+            }).await.unwrap();
+        }
+        } else {
+            assert!(trace.state.borrow().armed_sides.is_empty());
+            capture.send(CaptureEvent::Begin { point: [999., 400.] }).await.unwrap();
+            capture.send(CaptureEvent::Input(Event::Pointer(PointerEvent::Motion { time: 0, dx: 100., dy: 0. }))).await.unwrap();
+            let switched = tokio::time::timeout(Duration::from_millis(50), async {
+                loop {
+                    if matches!(protocol::read(&mut remote).await.unwrap(), Message::Enter(_)) { break; }
+                }
+            }).await;
+            assert!(switched.is_err(), "Receive-only peer must not transfer local mouse input");
+        }
+        let received = Input::Motion { x: 0.75, y: 0.6 };
+        protocol::write(&mut remote, &Message::Enter([0.75, 0.6])).await.unwrap();
+        if mode.can_receive() {
+            trace.wait_for(|state| state.injected.contains(&received)).await;
+        } else {
+            trace.wait_for(|state| state.closed).await;
+            assert!(!trace.state.borrow().injected.contains(&received), "Send-only peer accepted remote mouse movement");
+        }
+        commands.send(HubCommand::Shutdown).await.unwrap();
+        hub.await.unwrap().unwrap();
+        assert!(trace.state.borrow().closed);
+    }).await;
+}
+
+#[tokio::test]
+async fn single_peer_hub_keeps_capture_alive_and_transfers_motion() {
+    check_single_peer_transfer(TransferMode::Both).await;
+}
+
+#[tokio::test]
+async fn single_peer_send_only_transfers_motion_and_rejects_remote_control() {
+    check_single_peer_transfer(TransferMode::SendOnly).await;
+}
+
+#[tokio::test]
+async fn single_peer_receive_only_does_not_capture_and_accepts_remote_motion() {
+    check_single_peer_transfer(TransferMode::ReceiveOnly).await;
 }

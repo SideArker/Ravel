@@ -187,6 +187,7 @@ mod tests {
         let mut s = Store::load(dir.path()).unwrap();
         s.trust(fp.clone(), "Laptop".into()).unwrap();
         let layout = Layout {
+            transfer: crate::geometry::TransferMode::SendOnly,
             alignment: 0.2,
             ..Layout::default()
         };

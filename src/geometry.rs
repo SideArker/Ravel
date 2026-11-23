@@ -161,12 +161,38 @@ impl Side {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferMode {
+    #[default]
+    Both,
+    SendOnly,
+    ReceiveOnly,
+}
+
+impl TransferMode {
+    pub fn can_send(self) -> bool {
+        self != Self::ReceiveOnly
+    }
+    pub fn can_receive(self) -> bool {
+        self != Self::SendOnly
+    }
+    pub fn reciprocal(self) -> Self {
+        match self {
+            Self::Both => Self::Both,
+            Self::SendOnly => Self::ReceiveOnly,
+            Self::ReceiveOnly => Self::SendOnly,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layout {
     pub side: Side,
     /// Offset as a fraction of edge length; independent of DPI.
     pub alignment: f64,
+    #[serde(default)]
+    pub transfer: TransferMode,
 }
 
 impl Layout {
@@ -181,6 +207,7 @@ impl Layout {
         Self {
             side: self.side.opposite(),
             alignment: -self.alignment,
+            transfer: self.transfer.reciprocal(),
         }
     }
     pub fn enter(self, point: [f64; 2]) -> Option<[f64; 2]> {
@@ -293,6 +320,7 @@ mod tests {
             let l = Layout {
                 side,
                 alignment: 0.2,
+                ..Default::default()
             };
             let p = [0.6, 0.7];
             let remote = l.enter(p).unwrap();
@@ -304,7 +332,8 @@ mod tests {
         assert!(
             Layout {
                 side: Side::Right,
-                alignment: 0.5
+                alignment: 0.5,
+                ..Default::default()
             }
             .enter([1., 0.2])
             .is_none()
@@ -328,7 +357,8 @@ mod side_tests {
         assert!(
             Layout {
                 side: Side::Left,
-                alignment: 0.95
+                alignment: 0.95,
+                ..Default::default()
             }
             .validate()
             .is_err()
@@ -336,7 +366,8 @@ mod side_tests {
         assert!(
             Layout {
                 side: Side::Left,
-                alignment: f64::NAN
+                alignment: f64::NAN,
+                ..Default::default()
             }
             .validate()
             .is_err()
@@ -352,8 +383,33 @@ mod overlap_tests {
         let layout = Layout {
             side: Side::Right,
             alignment: 0.5,
+            ..Default::default()
         };
         assert!(layout.return_point([0.0, 0.8]).is_none());
         assert!(layout.return_point([0.0, 0.2]).is_some());
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_layouts_default_to_both_and_transfer_choices_are_reciprocal() {
+        let old: Layout = serde_json::from_str(r#"{"side":"Right","alignment":0.0}"#).unwrap();
+        assert_eq!(old.transfer, TransferMode::Both);
+        for mode in [
+            TransferMode::Both,
+            TransferMode::SendOnly,
+            TransferMode::ReceiveOnly,
+        ] {
+            let layout = Layout {
+                transfer: mode,
+                ..Default::default()
+            };
+            assert_eq!(layout.reciprocal().transfer.can_receive(), mode.can_send());
+            assert_eq!(layout.reciprocal().transfer.can_send(), mode.can_receive());
+            assert_eq!(layout.reciprocal().reciprocal(), layout);
+        }
     }
 }
