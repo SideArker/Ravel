@@ -2728,7 +2728,7 @@ dependencies = [
 
 [[package]]
 name = "ravel"
-version = "0.5.3-dev"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "ashpd",
