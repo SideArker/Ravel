@@ -8,7 +8,8 @@ push, successful transfer, multiple peers, and the authenticated input stream.
 The animation removal did not remove this gate.
 
 Windows now reads relative mouse motion through Raw Input, so outward movement
-continues at the last desktop pixel. Geometry tests cover all four edges,
+continues at the last desktop pixel. The motion that first reaches the edge
+is excluded from the push threshold. Geometry tests cover all four edges,
 negative origins, and adjacent monitors. Stale monitor selections fall back to
 an active output and are saved; invalid interior handoff edges are reported.
 Tray menu actions use stable IDs across recreation and wake hidden Windows GUIs.

@@ -461,7 +461,8 @@ fn raw_mouse_motion(lparam: LPARAM) {
                 point: [point.0 as f64, point.1 as f64],
             },
         );
-        pos
+        // The motion that reached the edge is not part of the deliberate outward push.
+        return;
     };
     blocking_send_event(
         pos,
